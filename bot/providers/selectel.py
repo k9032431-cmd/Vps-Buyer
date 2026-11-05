@@ -115,6 +115,19 @@ class SelectelVDSClient:
                                   round(p.get("disk", 0) / 1024), f"{month / 100:g} ₽/мес" if month else ""))
         return sorted(flavors, key=lambda f: (f.vcpus, f.ram_mb, f.disk_gb))
 
+    async def cheapest_plan(self, region: str) -> tuple[Flavor, float]:
+        """Cheapest tariff in a location and its price per hour in roubles (for IP scouting)."""
+        flavors, prices = await asyncio.gather(self.list_flavors(region), self._request("GET", "/billing/prices"))
+        prices = (prices or {}).get("default", {})
+
+        def hour(f: Flavor) -> float:
+            p = prices.get(f.id)
+            return (p.get("hour") or 0) / 100 if isinstance(p, dict) else float("inf")
+        if not flavors:
+            raise ProviderError("В этой локации нет тарифов")
+        best = min(flavors, key=lambda f: (hour(f), f.ram_mb))
+        return best, (hour(best) if hour(best) != float("inf") else 0.0)
+
     async def list_images(self, region: str, flavor: Flavor | None = None) -> list[Image]:
         images = await self._request("GET", "/images")
         return sorted(
@@ -152,11 +165,19 @@ class SelectelVDSClient:
         return self._server(await self._request("GET", f"/scalets/{server_id}"))
 
     async def delete_server(self, region: str, server_id: str) -> None:
-        try:
-            await self._request("DELETE", f"/scalets/{server_id}")
-        except ProviderError as e:
-            if e.status != 404:
-                raise
+        # A fresh scalet is "locked" while it is being set up — deleting then fails, so retry for a while.
+        for attempt in range(12):
+            try:
+                await self._request("DELETE", f"/scalets/{server_id}")
+                return
+            except ProviderError as e:
+                if e.status == 404:
+                    return
+                busy = e.status in (400, 409, 423, 429)
+                transient = (e.status or 0) >= 500 and attempt < 3
+                if attempt == 11 or not (busy or transient):
+                    raise
+                await asyncio.sleep(5)
 
     async def wait_ip(self, region: str, server_id: str, timeout: int) -> Server:
         return await self._wait(server_id, timeout, need_active=False)

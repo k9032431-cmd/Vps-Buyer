@@ -12,6 +12,7 @@ from aiogram.utils.text_decorations import html_decoration as hd
 
 from .. import db, geo
 from ..buyer import PurchaseJob, run_purchase
+from ..scanner import ScanJob, run_scan
 from ..config import config
 from .. import os_names
 from ..providers import Flavor, IpPool, ProviderError
@@ -24,7 +25,7 @@ router = Router()
 log = logging.getLogger(__name__)
 
 # user_id -> running job
-JOBS: dict[int, PurchaseJob] = {}
+JOBS: dict[int, "PurchaseJob | ScanJob"] = {}
 
 MAX_IP_BUTTONS = 60
 
@@ -137,6 +138,9 @@ async def refresh_regions(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("buy:reg:"))
 async def choose_ip(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
+    if "regions" not in data:  # e.g. a button from an old message after the menu was opened
+        await cb.answer("🔁 Начните покупку заново", show_alert=True)
+        return await choose_provider(cb, state)
     region = data["regions"][int(cb.data.split(":")[2])]
     label = data["region_labels"][region]
     await state.update_data(region=region, region_label=label)
@@ -172,7 +176,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     else:
         text += ("🤷 Список подсетей пока неизвестен.\n"
                  "Бот запоминает IP, которые выдаёт провайдер, и после первой покупки покажет их здесь.\n"
-                 "Пока добавьте IP вручную через «✏️ Свой IP».")
+                 "Пока добавьте IP вручную через «✏️ Свой IP»"
+                 + (" или нажмите «🔍 Разведать доступные IP»." if data.get("provider") == "selectel" else "."))
     if data.get("full_blocks"):
         text += f"\n\n🙈 <i>Скрыто блоков без свободных IP: {data['full_blocks']}</i>"
     if custom:
@@ -187,6 +192,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
         rows.append([Btn(text="☑️ Выбрать все", callback_data="buy:ipall"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
     rows.append([Btn(text="✏️ Свой IP", callback_data="buy:ip:custom")])
+    if data.get("provider") == "selectel":
+        rows.append([Btn(text="🔍 Разведать доступные IP", callback_data="buy:scan")])
     if total:
         rows.append([Btn(text=f"➡️ Дальше · выбрано {total}", callback_data="buy:ipok")])
     rows.append(back(f"buy:acc:{data['account_id']}"))
@@ -636,3 +643,121 @@ async def cancel(cb: CallbackQuery):
         await cb.answer("⛔ Останавливаю после текущей попытки…", show_alert=True)
     else:
         await cb.answer("🤷 Нет активной покупки")
+
+
+# ---------- IP scouting (Selectel VDS: no subnet API) ----------
+SCAN_SIZES = (5, 10, 20)
+
+
+@router.callback_query(F.data == "buy:scan")
+async def scan_offer(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await cb.message.edit_text("⏳ Считаю стоимость разведки…")
+    await cb.answer()
+    try:
+        async with await _client_for(cb, state) as client:
+            flavor, hour = await client.cheapest_plan(data["region"])
+            images = await client.list_images(data["region"], flavor)
+    except Exception as e:
+        return await _error(cb, e)
+    if not images:
+        return await _error(cb, Exception("Нет образов для пробных серверов"))
+    choices, _ = os_names.simplify(images)
+    image_id = choices[0].id if choices else images[0].id
+    await state.update_data(scan={"flavor": asdict(flavor), "image_id": image_id, "hour": hour})
+    rows = [[Btn(text=f"🔍 {n} серверов · ≈{n * hour:.2f} ₽", callback_data=f"buy:scango:{n}")] for n in SCAN_SIZES]
+    rows.append(back("buy:ipback", "⬅️ Назад к выбору IP"))
+    await cb.message.edit_text(
+        "🔍 <b>Разведка IP</b>\n"
+        f"📍 {hd.quote(data['region_label'])}\n\n"
+        "У Selectel VDS нет списка подсетей, поэтому бот один раз проверит их сам:\n"
+        "1️⃣ создаст несколько самых дешёвых серверов\n"
+        "2️⃣ запишет, какие IP они получили\n"
+        "3️⃣ сразу удалит каждый сервер\n"
+        "4️⃣ пришлёт отчёт: какие блоки <code>a.b.c.#</code> сейчас выдаются\n\n"
+        f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} ₽/час\n"
+        "💸 Оплата почасовая — каждый пробный сервер обходится примерно в час тарифа.\n\n"
+        "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP.",
+        reply_markup=kb(*rows))
+
+
+@router.callback_query(F.data.startswith("buy:scango:"))
+async def scan_go(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    uid = cb.from_user.id
+    if uid in JOBS:
+        return await cb.answer("⏳ Уже идёт покупка или разведка", show_alert=True)
+    data = await state.get_data()
+    if "scan" not in data:
+        return await cb.answer("🔁 Откройте разведку заново", show_alert=True)
+    acc = await db.get_account(uid, data["account_id"])
+    job = ScanJob(region=data["region"], flavor=Flavor(**data["scan"]["flavor"]), image_id=data["scan"]["image_id"],
+                  samples=int(cb.data.split(":")[2]))
+    JOBS[uid] = job
+    cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
+    label = data["region_label"]
+    await cb.message.edit_text(_scan_text(job, label), reply_markup=cancel_kb)
+    await cb.answer()
+    region_idx = data["regions"].index(data["region"])
+    asyncio.create_task(_run_scan(bot, cb.message, uid, acc, job, cancel_kb, label, region_idx))
+
+
+def _scan_text(job: ScanJob, label: str, done: bool = False) -> str:
+    head = "🏁 <b>Разведка завершена</b>" if done else "🔍 <b>Идёт разведка IP…</b>"
+    text = (f"{head}\n\n📍 {hd.quote(label)}\n"
+            f"🆕 Создано: <b>{job.created}/{job.samples}</b>   🗑 Удалено: <b>{job.deleted}</b>   "
+            f"🌐 IP: <b>{len(job.ips)}</b>\n")
+    if job.log:
+        text += "\n" + "\n".join(job.log[-12:])
+    return text[:4000]
+
+
+async def _run_scan(bot: Bot, msg: Message, uid: int, acc: db.Account, job: ScanJob, cancel_kb, label: str,
+                    region_idx: int):
+    last = 0.0
+
+    async def progress(j: ScanJob):
+        nonlocal last
+        if time.time() - last < 3:
+            return
+        last = time.time()
+        try:
+            await msg.edit_text(_scan_text(j, label), reply_markup=cancel_kb)
+        except Exception:
+            pass
+
+    try:
+        async with make_client(acc) as client:
+            await run_scan(client, job, progress)
+    except Exception as e:
+        log.exception("scan failed")
+        job.error = str(e)
+    finally:
+        JOBS.pop(uid, None)
+
+    if job.ips:
+        await db.add_seen_ips(acc.provider, job.region, job.ips)
+    try:
+        await msg.edit_text(_scan_text(job, label, done=True))
+    except Exception:
+        pass
+
+    blocks = job.blocks()
+    lines = [f"📊 <b>Отчёт разведки</b>\n📍 {hd.quote(label)}\n",
+             f"🖥 Проверено серверов: <b>{job.created}</b> · получено IP: <b>{len(job.ips)}</b>"]
+    if blocks:
+        lines.append(f"🌐 Найдено блоков: <b>{len(blocks)}</b>\n")
+        lines += [f"▫️ <code>{p}.#</code> — {n} из {len(job.ips)} ({n * 100 // len(job.ips)}%)" for p, n in blocks]
+        lines.append("\n💡 Чем чаще блок выпадал, тем быстрее бот купит сервер с IP из него.\n"
+                     "✅ Блоки сохранены — они уже есть в выборе IP.")
+    else:
+        lines.append("\n🤷 Ни одного IP получить не удалось.")
+    if job.cancelled:
+        lines.append("\n⛔ Разведка остановлена вами.")
+    if job.error:
+        lines.append(f"\n❗ Ошибка: <code>{hd.quote(job.error[:300])}</code>")
+    if job.leftovers:
+        lines.append("\n⚠️ Не удалось удалить серверы: " + ", ".join(f"<code>{x}</code>" for x in job.leftovers)
+                     + " — удалите их в панели Selectel, чтобы они не списывали деньги.")
+    await send_safe(bot, uid, "\n".join(lines)[:4000], reply_markup=kb(
+        [Btn(text="➡️ Выбрать IP", callback_data=f"buy:reg:{region_idx}")],
+        back("menu", "🏠 Главное меню")))

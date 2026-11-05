@@ -54,7 +54,11 @@
 API: `https://api.vscale.io/v1`, лимит 12 созданий серверов в минуту — бот сам выдерживает паузы.
 У Selectel нет API со списком IP-подсетей, поэтому бот показывает подсети по IP уже существующих
 серверов и запоминает все IP, которые выдаёт провайдер, — после первой покупки список станет полнее.
-До этого префикс можно ввести вручную.
+
+**🔍 Разведать доступные IP** (кнопка на шаге выбора IP для Selectel): бот один раз создаёт 5 / 10 / 20
+самых дешёвых серверов, записывает их IP, сразу удаляет каждый и присылает отчёт — какие блоки
+`a.b.c.#` выдаются и как часто. Перед запуском показывается примерная стоимость (≈ час тарифа на
+каждый пробный сервер). Найденные блоки сохраняются и появляются в выборе IP.
 
 ## Подключение аккаунта HostVDS
 
@@ -86,7 +90,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`
 
 ## Доступ по приглашению
 
