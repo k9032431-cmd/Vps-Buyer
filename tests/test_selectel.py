@@ -145,14 +145,14 @@ async def scenario():
         user = User(id=UID, is_bot=False, first_name="A")
         msg = Message(message_id=5, date=datetime.now(), chat=Chat(id=UID, type="private"), from_user=user, text=TOKEN)
         await dp.feed_update(bot, Update(update_id=2, message=msg))
-        assert "Selectel VDS: <code>me@example.com</code> подключён" in session.texts()[-1], session.texts()[-1]
+        assert "Аккаунт подключён" in session.texts()[-1] and "<code>me@example.com</code>" in session.texts()[-1]
         acc = (await db.list_accounts(UID, "selectel"))[0]
         assert acc.password == TOKEN
         await dp.feed_update(bot, cb_update(3, "buy:prov:selectel"))
         await dp.feed_update(bot, cb_update(4, f"buy:acc:{acc.id}"))
         text = session.texts()[-1]
         print(text)
-        assert "Доступно: 2 из 3" in text and "🇷🇺 Санкт-Петербург · spb0" in str(session.calls[-1].reply_markup)
+        assert "Доступно: <b>2</b> из 3" in text and "🇷🇺 Санкт-Петербург · spb0" in str(session.calls[-1].reply_markup)
     finally:
         await srv.close()
         selectel.asyncio.sleep = orig_sleep

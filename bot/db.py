@@ -192,3 +192,9 @@ async def seen_ips(provider: str, region: str) -> list[str]:
         rows = await (await db.execute(
             "SELECT ip FROM ip_seen WHERE provider=? AND region=?", (provider, region))).fetchall()
     return [r[0] for r in rows]
+
+
+async def update_server_password(user_id: int, row_id: int, password: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute("UPDATE servers SET admin_pass=? WHERE id=? AND user_id=?", (_enc(password), row_id, user_id))
+        await db.commit()

@@ -42,7 +42,7 @@ async def main() -> None:
     if notify:
         from .keyboards import main_menu
         try:
-            await bot.send_message(notify["chat_id"], notify["text"] + f"\n\n🟢 Бот перезапущен, версия "
+            await bot.send_message(notify["chat_id"], notify["text"] + f"\n\n🟢 <b>Бот снова в строю</b>\n🏷 "
                                    f"<code>{await updater.current_version()}</code>", reply_markup=main_menu(True))
         except Exception:
             log.exception("update notify failed")

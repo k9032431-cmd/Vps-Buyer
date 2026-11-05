@@ -4,6 +4,7 @@ import time
 from dataclasses import asdict
 
 from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton as Btn, Message
@@ -42,7 +43,8 @@ async def _client_for(cb_or_msg, state: FSMContext):
 
 
 async def _error(cb: CallbackQuery, e: Exception):
-    await cb.message.edit_text(f"❌ Ошибка: {hd.quote(str(e))}", reply_markup=kb(back("buy")))
+    await cb.message.edit_text(f"❌ <b>Ошибка</b>\n\n<code>{hd.quote(str(e)[:500])}</code>",
+                               reply_markup=kb(back("buy", "🔁 Начать заново"), back("menu", "🏠 Главное меню")))
 
 
 # ---------- 1. provider ----------
@@ -50,10 +52,11 @@ async def _error(cb: CallbackQuery, e: Exception):
 async def choose_provider(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     if cb.from_user.id in JOBS:
-        await cb.answer("У вас уже идёт покупка — дождитесь окончания или отмените её.", show_alert=True)
+        await cb.answer("⏳ Уже идёт покупка — дождитесь окончания или остановите её.", show_alert=True)
         return
-    rows = [[Btn(text=f"🌐 {name}", callback_data=f"buy:prov:{key}")] for key, name in PROVIDERS.items()]
-    await cb.message.edit_text("🛒 <b>Купить сервер</b>\n\nВыберите провайдера:", reply_markup=kb(*rows, back()))
+    rows = [[Btn(text=f"☁️ {name}", callback_data=f"buy:prov:{key}")] for key, name in PROVIDERS.items()]
+    await cb.message.edit_text("🛒 <b>Покупка сервера</b>\n\n<b>Шаг 1.</b> Выберите провайдера 👇",
+                               reply_markup=kb(*rows, back("menu", "🏠 Главное меню")))
     await cb.answer()
 
 
@@ -95,7 +98,7 @@ async def choose_region(cb: CallbackQuery, state: FSMContext):
 
 async def show_regions(cb: CallbackQuery, state: FSMContext, account_id: int):
     await state.update_data(account_id=account_id)
-    await cb.message.edit_text("⏳ Проверяю, в каких локациях можно купить сервер…")
+    await cb.message.edit_text("⏳ Проверяю, где сейчас можно купить сервер…")
     await cb.answer()
     data = await state.get_data()
     try:
@@ -105,15 +108,16 @@ async def show_regions(cb: CallbackQuery, state: FSMContext, account_id: int):
     available = [(r, label) for r, label, ok, _ in regions if ok]
     unavailable = [(label, reason) for _, label, ok, reason in regions if not ok]
     if not available:
-        text = "😔 Сейчас нет доступных локаций.\n\n" + "\n".join(
+        text = "😔 <b>Сейчас нет доступных локаций</b>\n\n" + "\n".join(
             f"• {hd.quote(label)} — {hd.quote(reason)}" for label, reason in unavailable)
         await cb.message.edit_text(text[:4000], reply_markup=kb(
             [Btn(text="🔄 Проверить снова", callback_data=f"buy:refresh:{data['account_id']}")], back("buy")))
         return
     await state.update_data(regions=[r for r, _ in available], region_labels={r: label for r, label in available})
-    text = f"📍 <b>Выберите локацию</b>\n\nДоступно: {len(available)} из {len(regions)}"
+    text = (f"📍 <b>Шаг 2.</b> Выберите локацию 👇\n\n"
+            f"✅ Доступно: <b>{len(available)}</b> из {len(regions)}")
     if unavailable:
-        text += "\n\n<i>Недоступны:</i>\n" + "\n".join(
+        text += "\n\n🚫 <i>Сейчас недоступны:</i>\n" + "\n".join(
             f"• {hd.quote(label)} — {hd.quote(reason[:60])}" for label, reason in unavailable)
     buttons = [Btn(text=label, callback_data=f"buy:reg:{i}") for i, (_, label) in enumerate(available)]
     await cb.message.edit_text(text[:4000], reply_markup=kb(
@@ -136,7 +140,7 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     region = data["regions"][int(cb.data.split(":")[2])]
     label = data["region_labels"][region]
     await state.update_data(region=region, region_label=label)
-    await cb.message.edit_text(f"⏳ Проверяю, какие IP есть в <b>{hd.quote(label)}</b>…")
+    await cb.message.edit_text(f"⏳ Смотрю свободные IP в <b>{hd.quote(label)}</b>…")
     await cb.answer()
     try:
         async with await _client_for(cb, state) as client:
@@ -155,7 +159,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     data = await state.get_data()
     pools, selected, custom = data["pools"], set(data.get("selected", [])), data.get("custom", [])
     shown = pools[:MAX_IP_BUTTONS]
-    text = f"🌐 <b>Доступные IP в {hd.quote(data['region_label'])}</b> ({len(pools)})\n\n"
+    text = (f"🌐 <b>Шаг 3.</b> Какие IP искать?\n"
+            f"📍 {hd.quote(data['region_label'])} · блоков: <b>{len(pools)}</b>\n\n")
     if pools:
         text += "\n".join(f"{'✅' if i in selected else '▫️'} <code>{p['prefix']}.#</code>"
                           + (f" · свободно {p['free']}" if p.get("free") else "")
@@ -165,24 +170,25 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
         if len(pools) > len(shown):
             text += f"\n\nКнопками показаны первые {len(shown)} — остальные добавьте через «✏️ Свой IP»."
     else:
-        text += ("Список подсетей пока неизвестен — бот запоминает IP, которые выдаёт провайдер, "
-                 "и после первой покупки покажет их здесь. Сейчас добавьте IP вручную.")
+        text += ("🤷 Список подсетей пока неизвестен.\n"
+                 "Бот запоминает IP, которые выдаёт провайдер, и после первой покупки покажет их здесь.\n"
+                 "Пока добавьте IP вручную через «✏️ Свой IP».")
     if data.get("full_blocks"):
-        text += f"\n\n<i>Скрыто блоков без свободных IP: {data['full_blocks']}</i>"
+        text += f"\n\n🙈 <i>Скрыто блоков без свободных IP: {data['full_blocks']}</i>"
     if custom:
         text += "\n\n✏️ Добавлено вручную: " + ", ".join(f"<code>{show_prefix(c)}</code>" for c in custom)
     total = len(selected) + len(custom)
-    text += ("\n\n<b>Отметьте один или несколько IP</b> — бот купит сервер, как только выпадет любой из них."
-             f"\nВыбрано: <b>{total}</b>")
+    text += ("\n\n💡 Отметьте <b>один или несколько</b> блоков — бот купит сервер, как только выпадет любой из них."
+             f"\n\n☑️ Выбрано: <b>{total}</b>")
     buttons = [Btn(text=f"{'✅ ' if i in selected else ''}{p['prefix']}.#", callback_data=f"buy:ipt:{i}")
                for i, p in enumerate(shown)]
     rows = grid(buttons, 2)
     if len(shown) > 1:
         rows.append([Btn(text="☑️ Выбрать все", callback_data="buy:ipall"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
-    rows.append([Btn(text="✏️ Свой IP (напр. 95.182.87)", callback_data="buy:ip:custom")])
+    rows.append([Btn(text="✏️ Свой IP", callback_data="buy:ip:custom")])
     if total:
-        rows.append([Btn(text=f"➡️ Готово ({total})", callback_data="buy:ipok")])
+        rows.append([Btn(text=f"➡️ Дальше · выбрано {total}", callback_data="buy:ipok")])
     rows.append(back(f"buy:acc:{data['account_id']}"))
     markup = kb(*rows)
     if edit:
@@ -234,9 +240,11 @@ def show_prefix(prefix: str) -> str:
 @router.callback_query(F.data == "buy:ip:custom")
 async def custom_prefix(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Buy.custom_prefix)
-    await cb.message.edit_text("✏️ Отправьте начало IP, например <code>95.182.87</code>, "
-                               "<code>94.103</code> или <code>94</code>.\n"
-                               "Можно несколько через пробел или запятую: <code>95.182.87 94.103.80</code>",
+    await cb.message.edit_text("✏️ <b>Свой IP</b>\n\nОтправьте начало IP-адреса:\n"
+                               "• <code>95.182.87</code> — блок 95.182.87.#\n"
+                               "• <code>94.103</code> — любой 94.103.#.#\n"
+                               "• <code>94</code> — любой 94.#.#.#\n\n"
+                               "💡 Можно несколько сразу: <code>95.182.87 94.103.80</code>",
                                reply_markup=kb(back("buy:ipback", "⬅️ Назад к списку")))
     await cb.answer()
 
@@ -261,7 +269,7 @@ async def custom_prefix_set(message: Message, state: FSMContext):
     raw = [x for x in message.text.replace(",", " ").replace(";", " ").split() if x]
     parsed = [_parse_prefix(x) for x in raw]
     if not raw or None in parsed:
-        await message.answer("Неверный формат. Пример: <code>95.182.87</code> или <code>94 95.182</code>")
+        await message.answer("⚠️ Не понял формат. Пример: <code>95.182.87</code> или <code>94 95.182</code>")
         return
     data = await state.get_data()
     pool_index = {p["prefix"]: i for i, p in enumerate(data["pools"])}
@@ -296,7 +304,7 @@ async def ip_done(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     prefixes = [data["pools"][i]["prefix"] for i in data.get("selected", [])] + data.get("custom", [])
     if not prefixes:
-        return await cb.answer("Выберите хотя бы один IP", show_alert=True)
+        return await cb.answer("☝️ Отметьте хотя бы один IP", show_alert=True)
     targets = _targets(data["pools"], prefixes)
     network_id = next((t[0] for t in targets if t[0]), None)
     await state.update_data(prefixes=prefixes, targets=targets, network_id=network_id)
@@ -313,8 +321,9 @@ def prefixes_text(prefixes: list[str], limit: int = 20) -> str:
 async def ask_count(message: Message, state: FSMContext, edit: bool = False):
     await state.set_state(Buy.count)
     data = await state.get_data()
-    text = (f"🔢 Ищем IP: {prefixes_text(data['prefixes'])}\n\nСколько серверов купить (всего)? "
-            "Выберите или отправьте число:")
+    text = (f"🔢 <b>Шаг 4.</b> Сколько серверов купить?\n\n"
+            f"🎯 Ищем: {prefixes_text(data['prefixes'])}\n\n"
+            "💡 Это общее число серверов с любым из выбранных IP. Нажмите кнопку или отправьте число.")
     buttons = [Btn(text=str(n), callback_data=f"buy:cnt:{n}") for n in (1, 2, 3, 5, 10)]
     markup = kb(buttons, back("buy", "❌ Отмена"))
     if edit:
@@ -326,7 +335,7 @@ async def ask_count(message: Message, state: FSMContext, edit: bool = False):
 @router.message(Buy.count)
 async def count_text(message: Message, state: FSMContext):
     if not message.text.strip().isdigit() or not 1 <= int(message.text) <= 100:
-        await message.answer("Отправьте число от 1 до 100.")
+        await message.answer("⚠️ Отправьте число от 1 до 100.")
         return
     await state.update_data(count=int(message.text))
     msg = await message.answer("⏳ Загружаю тарифы…")
@@ -350,15 +359,17 @@ async def show_flavors(msg: Message, state: FSMContext, user_id: int):
         async with make_client(acc) as client:
             flavors = await client.list_flavors(data["region"])
     except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {hd.quote(str(e))}", reply_markup=kb(back("buy")))
+        await msg.edit_text(f"❌ <b>Ошибка</b>\n\n<code>{hd.quote(str(e)[:500])}</code>",
+                            reply_markup=kb(back("buy", "🔁 Начать заново")))
         return
     flavors = flavors[:30]
     await state.update_data(flavors=[asdict(f) for f in flavors])
-    buttons = [Btn(text=f"{f.name} · {f.vcpus}vCPU/{f.ram_mb / 1024:g}GB"
-                        + (f"/{f.disk_gb}GB" if f.disk_gb else "") + (f" · {f.price}" if f.price else ""),
+    buttons = [Btn(text=f"{f.name} · {f.vcpus} vCPU · {f.ram_mb / 1024:g} GB"
+                        + (f" · {f.disk_gb} GB" if f.disk_gb else "") + (f" · {f.price}" if f.price else ""),
                    callback_data=f"buy:fl:{i}")
                for i, f in enumerate(flavors)]
-    await msg.edit_text("⚙️ <b>Выберите тариф:</b>", reply_markup=kb(*grid(buttons, 1), back("buy", "❌ Отмена")))
+    await msg.edit_text("⚙️ <b>Шаг 5.</b> Выберите тариф 👇\n\n💡 CPU · RAM · диск · цена в месяц",
+                        reply_markup=kb(*grid(buttons, 1), back("buy", "❌ Отмена")))
 
 
 # ---------- 6b. network plan (HostVDS) ----------
@@ -385,10 +396,11 @@ async def show_network_plans(msg: Message, flavor: dict, show_all: bool):
     rows = [[Btn(text=_plan_label(p, flavor.get("currency", "usd"), flavor.get("default_network_plan")),
                  callback_data=f"buy:np:{i}")] for i, p in shown]
     if not show_all and len(shown) < len(plans):
-        rows.append([Btn(text=f"🔽 Все планы ({len(plans)})", callback_data="buy:npall")])
-    text = (f"🌐 <b>Network plan</b> для тарифа <b>{hd.quote(flavor['name'])}</b>\n\n"
-            "⭐ — план тарифа по умолчанию (трафик ограничен).\n"
-            "Unlimited — безлимитный трафик: Shared — общий канал, Dedicated — выделенный.")
+        rows.append([Btn(text=f"🔽 Показать все планы ({len(plans)})", callback_data="buy:npall")])
+    text = (f"📶 <b>Шаг 6.</b> Network plan для <b>{hd.quote(flavor['name'])}</b> 👇\n\n"
+            "⭐ Limited — входит в тариф, трафик ограничен\n"
+            "♾ Unlimited Shared — безлимитный трафик, общий канал\n"
+            "🚀 Unlimited Dedicated — безлимит, выделенный канал (в «Все планы»)")
     await msg.edit_text(text, reply_markup=kb(*rows, back("buy", "❌ Отмена")))
 
 
@@ -428,7 +440,7 @@ async def _show_os(msg: Message, choices, has_other: bool):
     rows = grid(buttons, 2)
     if has_other:
         rows.append([Btn(text="📦 Другие образы", callback_data="buy:imgother")])
-    text = "💿 <b>Выберите операционную систему:</b>" if choices else "💿 <b>Выберите образ:</b>"
+    text = "💿 <b>Шаг 7.</b> Выберите операционную систему 👇" if choices else "💿 <b>Шаг 7.</b> Выберите образ 👇"
     await msg.edit_text(text, reply_markup=kb(*rows, back("buy", "❌ Отмена")))
 
 
@@ -436,7 +448,7 @@ async def _show_os(msg: Message, choices, has_other: bool):
 async def other_images(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     buttons = [Btn(text=i["name"][:45], callback_data=f"buy:imgo:{n}") for n, i in enumerate(data["other_images"])]
-    await cb.message.edit_text("📦 <b>Другие образы</b> (приложения, панели, старые версии):",
+    await cb.message.edit_text("📦 <b>Другие образы</b>\n\nПриложения, панели и старые версии 👇",
                                reply_markup=kb(*grid(buttons, 1), [Btn(text="⬅️ К списку ОС", callback_data="buy:imgback")]))
     await cb.answer()
 
@@ -457,45 +469,74 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
     image = (data["other_images"] if kind == "imgo" else data["images"])[int(idx)]
     await state.update_data(image=image)
     f = data["flavor"]
-    text = (
-        "🧾 <b>Подтверждение</b>\n\n"
-        f"Провайдер: <b>{PROVIDERS[data['provider']]}</b>\n"
-        f"Локация: <b>{hd.quote(data['region_label'])}</b>\n"
-        f"Нужные IP: {prefixes_text(data['prefixes'])}\n"
-        f"Тариф: <b>{hd.quote(f['name'])}</b> ({f['vcpus']} vCPU, {f['ram_mb']} MB"
-        f"{', ' + f['price'] if f.get('price') else ''})\n"
-        + (f"Network plan: <b>{hd.quote(data['network_plan']['title'])}</b>"
-           f"{' · ' + money(data['network_plan']['price'], f.get('currency', 'usd')) + '/мес' if data['network_plan']['price'] else ''}\n"
-           if data.get("network_plan") else "")
-        + f"ОС: <b>{hd.quote(image['name'])}</b>\n"
-        f"Количество: <b>{data['count']}</b>\n\n"
-        + ("⚡ Быстрый режим: IP подбирается бесплатно через сетевые порты, сервер покупается "
-           "только на подходящий IP.\n" if data.get("network_id") and data["provider"] == "hostvds" else "")
-        + f"⚠️ Если быстрый режим недоступен — серверы с чужим IP удаляются сразу, как только видно IP "
-          f"(максимум {config.max_attempts} созданий). Каждое создание может стоить денег."
-    )
+    np = data.get("network_plan")
+    lines = [
+        "🧾 <b>Проверьте заказ</b>\n",
+        f"☁️ Провайдер: <b>{PROVIDERS[data['provider']]}</b>",
+        f"📍 Локация: <b>{hd.quote(data['region_label'])}</b>",
+        f"🎯 Ищем IP: {prefixes_text(data['prefixes'])}",
+        f"⚙️ Тариф: <b>{hd.quote(f['name'])}</b> · {f['vcpus']} vCPU · {f['ram_mb'] / 1024:g} GB"
+        + (f" · {f['price']}" if f.get("price") else ""),
+    ]
+    if np:
+        price = f" · {money(np['price'], f.get('currency', 'usd'))}/мес" if np["price"] else " · бесплатно"
+        lines.append(f"📶 Network plan: <b>{hd.quote(np['title'])}</b>{price}")
+    lines += [f"💿 ОС: <b>{hd.quote(image['name'])}</b>", f"🔢 Количество: <b>{data['count']}</b>", ""]
+    if data.get("network_id") and data["provider"] == "hostvds":
+        lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
+                     "сервер покупается только на подходящий IP.")
+    lines.append(f"💸 Если быстрый режим недоступен, серверы с чужим IP удаляются сразу "
+                 f"(максимум {config.max_attempts} созданий). Каждое создание может стоить денег.")
+    text = "\n".join(lines)
     await cb.message.edit_text(text, reply_markup=kb(
-        [Btn(text="✅ Купить", callback_data="buy:go")], back("buy", "❌ Отмена")))
+        [Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")))
     await cb.answer()
 
 
 # ---------- 9. run ----------
-def _progress_text(job: PurchaseJob, done: bool = False) -> str:
-    head = "🏁 <b>Готово</b>" if done else "⏳ <b>Покупка идёт…</b>"
-    text = f"{head}\n\nИщем IP: {prefixes_text(job.prefixes, 10)} в {hd.quote(job.region)}\n"
+def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str:
+    head = "🏁 <b>Покупка завершена</b>" if done else "⏳ <b>Идёт покупка…</b>"
+    text = (f"{head}\n\n"
+            f"📍 {hd.quote(label or job.region)}\n"
+            f"🎯 Ищем: {prefixes_text(job.prefixes, 10)}\n")
     if job.mode == "ports":
         text += f"⚡ Проверено IP (бесплатно): <b>{job.ports_checked}</b>\n"
-    text += (f"Готово серверов: <b>{len(job.kept)}/{job.count}</b> · создано: {job.attempts} · "
-             f"удалено: {job.deleted}\n\n")
-    text += "\n".join(job.log[-12:])
+    text += (f"✅ Готово: <b>{len(job.kept)}/{job.count}</b>   "
+             f"🆕 Создано: <b>{job.attempts}</b>   🗑 Удалено: <b>{job.deleted}</b>\n")
+    if job.log:
+        text += "\n" + "\n".join(job.log[-12:])
     return text[:4000]
+
+
+async def send_safe(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
+    """Telegram send with retries (flood limits, network hiccups) — a lost message here means a lost password."""
+    for attempt in range(5):
+        try:
+            await bot.send_message(chat_id, text, **kwargs)
+            return True
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+        except Exception:
+            log.exception("send_message failed (attempt %s)", attempt + 1)
+            await asyncio.sleep(2 * (attempt + 1))
+    return False
+
+
+def server_card(ip: str, password: str | None, name: str = "", label: str = "") -> str:
+    lines = [f"🖥 <code>{ip}</code>"]
+    if password:
+        lines.append(f"🔑 <code>{hd.quote(password)}</code>")
+    lines.append(f"💻 <code>ssh root@{ip}</code>")
+    if name or label:
+        lines.append(f"🏷 {hd.quote(name)}{' · ' + hd.quote(label) if label else ''}")
+    return "\n".join(lines)
 
 
 @router.callback_query(F.data == "buy:go")
 async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
     uid = cb.from_user.id
     if uid in JOBS:
-        await cb.answer("Покупка уже идёт", show_alert=True)
+        await cb.answer("⏳ Покупка уже идёт", show_alert=True)
         return
     data = await state.get_data()
     await state.clear()
@@ -513,13 +554,15 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
     )
     JOBS[uid] = job
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
-    await cb.message.edit_text(_progress_text(job), reply_markup=cancel_kb)
+    await cb.message.edit_text(_progress_text(job, label=data.get("region_label", "")), reply_markup=cancel_kb)
     await cb.answer()
-    asyncio.create_task(_run(bot, cb.message, uid, acc, job, cancel_kb))
+    asyncio.create_task(_run(bot, cb.message, uid, acc, job, cancel_kb, data.get("region_label", "")))
 
 
-async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJob, cancel_kb):
+async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJob, cancel_kb, label: str = ""):
     last_edit = 0.0
+    saved: set[str] = set()
+    found_lock = asyncio.Lock()
 
     async def progress(j: PurchaseJob):
         nonlocal last_edit
@@ -527,20 +570,26 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
             return
         last_edit = time.time()
         try:
-            await msg.edit_text(_progress_text(j), reply_markup=cancel_kb)
+            await msg.edit_text(_progress_text(j, label=label), reply_markup=cancel_kb)
         except Exception:
             pass
 
+    async def save(server) -> None:
+        if server.id not in saved:
+            await db.add_server(uid, acc.id, job.region, server.id, server.name, server.ipv4[0], server.admin_pass)
+            saved.add(server.id)
+
     async def found(server):
-        # Save and send each server right away — no need to wait for the whole job.
-        ip = server.ipv4[0]
-        await db.add_server(uid, acc.id, job.region, server.id, server.name, ip, server.admin_pass)
-        text = (f"🎉 <b>Найден IP</b> <code>{ip}</code>\n\n"
-                f"Сервер: {hd.quote(server.name)} · {hd.quote(job.region)}\n"
-                f"Готово: {len(job.kept)}/{job.count}")
-        if server.admin_pass:
-            text += f"\nПароль root: <tg-spoiler>{hd.quote(server.admin_pass)}</tg-spoiler>"
-        await bot.send_message(uid, text)
+        # Save and send each server right away — one at a time, so nothing gets lost.
+        async with found_lock:
+            try:
+                await save(server)
+            except Exception:
+                log.exception("saving server %s failed", server.id)
+            await send_safe(bot, uid, f"🎉 <b>Нашёлся IP!</b>  ({len(job.kept)}/{job.count})\n\n"
+                            + server_card(server.ipv4[0], server.admin_pass, server.name, label)
+                            + ("\n\n⏱ Пароль начнёт работать примерно через минуту после запуска."
+                               if acc.provider == "hostvds" else ""))
 
     job.on_found = found
     try:
@@ -553,22 +602,30 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
         JOBS.pop(uid, None)
 
     await db.add_seen_ips(acc.provider, job.region, job.seen)
+    for server in job.kept:  # make sure every bought server is in "My servers"
+        try:
+            await save(server)
+        except Exception:
+            log.exception("saving server %s failed", server.id)
 
     try:
-        await msg.edit_text(_progress_text(job, done=True))
+        await msg.edit_text(_progress_text(job, done=True, label=label))
     except Exception:
         pass
 
-    if len(job.kept) > 1:
-        lines = [f"🖥 <code>{s.ipv4[0]}</code>" for s in job.kept]
-        await bot.send_message(uid, f"✅ <b>Итого куплено {len(job.kept)}:</b>\n\n" + "\n".join(lines)
-                               + "\n\nПароли — в сообщениях выше и в «☁️ Мои серверы».")
-    reason = ("остановлено вами" if job.cancelled else
-              f"ошибка: {hd.quote(job.error)}" if job.error else
-              "достигнут лимит попыток" if len(job.kept) < job.count else None)
+    # Final summary always repeats IP + password of every server.
+    if job.kept:
+        cards = "\n\n".join(server_card(srv.ipv4[0], srv.admin_pass) for srv in job.kept)
+        await send_safe(bot, uid, f"📦 <b>Итого куплено: {len(job.kept)}</b>\n\n{cards}\n\n"
+                        "💡 Нажмите на IP или пароль, чтобы скопировать. Всё сохранено в «☁️ Мои серверы».")
+    reason = ("⛔ остановлено вами" if job.cancelled else
+              f"❗ ошибка: {hd.quote(job.error)}" if job.error else
+              "🔁 достигнут лимит попыток" if len(job.kept) < job.count else None)
     if reason:
-        await bot.send_message(uid, f"⚠️ Куплено {len(job.kept)} из {job.count} — {reason}.")
-    await bot.send_message(uid, "Что дальше?", reply_markup=kb(back("menu", "🏠 Главное меню")))
+        await send_safe(bot, uid, f"⚠️ <b>Куплено {len(job.kept)} из {job.count}</b>\n{reason}")
+    await send_safe(bot, uid, "👇 Что дальше?", reply_markup=kb(
+        [Btn(text="☁️ Мои серверы", callback_data="servers"), Btn(text="🛒 Купить ещё", callback_data="buy")],
+        back("menu", "🏠 Главное меню")))
 
 
 @router.callback_query(F.data == "buy:cancel")
@@ -576,6 +633,6 @@ async def cancel(cb: CallbackQuery):
     job = JOBS.get(cb.from_user.id)
     if job:
         job.cancelled = True
-        await cb.answer("Останавливаю после текущей попытки…", show_alert=True)
+        await cb.answer("⛔ Останавливаю после текущей попытки…", show_alert=True)
     else:
-        await cb.answer("Нет активной покупки")
+        await cb.answer("🤷 Нет активной покупки")

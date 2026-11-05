@@ -9,6 +9,7 @@ it finishes booting), delete it right away if the IP is wrong.
 """
 import asyncio
 import html
+import logging
 import secrets
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -73,7 +74,7 @@ async def _found(job: "PurchaseJob", server: Server) -> None:
         try:
             await job.on_found(server)
         except Exception:
-            pass
+            logging.getLogger(__name__).exception("on_found failed for %s", server.ipv4)
 
 
 def _code(ip: str) -> str:
@@ -116,7 +117,7 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                     job.seen.append(ip)
                 if ip and ip_matches(ip, job.prefixes) and len(good) < job.count:
                     good.append((port_id, ip))
-                    job.log.append(f"🎯 {_code(ip)} — найден")
+                    job.log.append(f"🎯 {_code(ip)} — нашёлся, покупаю сервер")
                 else:
                     held.append(port_id)
             if len(held) > HELD_PORTS_LIMIT:
@@ -169,7 +170,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
             if state.status == "ACTIVE":
                 state.admin_pass = srv.admin_pass
                 state.ipv4 = [good] + [ip for ip in state.ipv4 if ip != good]
-                job.log.append(f"✅ {_code(good)} — оставлен")
+                job.log.append(f"✅ {_code(good)} — подходит, оставлен")
                 await _found(job, state)
                 return
     except BaseException:
@@ -179,7 +180,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
     await client.delete_server(job.region, srv.id)
     job.deleted += 1
     ips = ", ".join(_code(ip) for ip in state.ipv4) or "без IP"
-    job.log.append(f"🗑 {ips} — удалён")
+    job.log.append(f"🗑 {ips} — не тот IP, удалён")
 
 
 async def run_purchase(client, job: PurchaseJob,
@@ -188,7 +189,7 @@ async def run_purchase(client, job: PurchaseJob,
         job.mode = "ports"
         good = await _hunt_ports(client, job, on_progress)
         if good is None:
-            job.log.append("ℹ️ Быстрый подбор через порты недоступен — покупаю серверы")
+            job.log.append("ℹ️ Быстрый подбор через порты недоступен — подбираю через серверы")
         else:
             results = await asyncio.gather(*(_server_on_port(client, job, p, ip) for p, ip in good),
                                            return_exceptions=True)

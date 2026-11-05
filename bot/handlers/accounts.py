@@ -38,8 +38,8 @@ async def accounts_view(user_id: int, provider: str | None = None, select_prefix
     rows.append(back("buy" if select_prefix else "menu"))
     title = PROVIDERS[provider] if provider else "провайдеров"
     text = f"🔑 <b>Аккаунты {title}</b>\n\n"
-    text += "Выберите аккаунт:" if select_prefix and total else (
-        f"Подключено: {total}" if total else "Нет подключённых аккаунтов.")
+    text += "👇 Выберите аккаунт для покупки" if select_prefix and total else (
+        f"✅ Подключено: <b>{total}</b>" if total else "📭 Пока нет подключённых аккаунтов.\n👇 Подключите аккаунт")
     return text, kb(*rows)
 
 
@@ -56,7 +56,7 @@ async def delete(cb: CallbackQuery):
     await db.delete_account(cb.from_user.id, int(cb.data.split(":")[2]))
     text, markup = await accounts_view(cb.from_user.id)
     await cb.message.edit_text(text, reply_markup=markup)
-    await cb.answer("Удалено")
+    await cb.answer("🗑 Аккаунт удалён")
 
 
 CANCEL = kb(back("accounts", "❌ Отмена"))
@@ -69,14 +69,15 @@ async def add_start(cb: CallbackQuery, state: FSMContext):
     if provider == "selectel":
         await state.set_state(AddAccount.token)
         text = ("➕ <b>Подключение Selectel VDS</b>\n\n"
-                "1. Откройте панель vds.selectel.ru → <b>Настройки → API</b> (токены).\n"
-                "2. Создайте токен с правом на <b>запись</b>.\n"
-                "3. Отправьте токен сюда. Сообщение с токеном будет удалено.")
+                "1️⃣ Откройте vds.selectel.ru → <b>Настройки → API</b>.\n"
+                "2️⃣ Создайте токен с правом на <b>запись</b>.\n"
+                "3️⃣ Отправьте токен сюда.\n\n"
+                "🔒 Сообщение с токеном бот сразу удалит.")
     else:
         await state.set_state(AddAccount.username)
         text = ("➕ <b>Подключение HostVDS</b>\n\n"
-                "Нужны данные OpenStack API из панели HostVDS (файл <code>openrc.sh</code> / раздел API).\n\n"
-                "Шаг 1/2. Отправьте <b>логин</b> (<code>OS_USERNAME</code>, обычно вида "
+                "📄 Нужны данные OpenStack API из панели HostVDS (файл <code>openrc.sh</code>).\n\n"
+                "1️⃣ Отправьте <b>логин</b> (<code>OS_USERNAME</code>, обычно вида "
                 "<code>hostvds-xxxxxxxx-...</code>).")
     await cb.message.edit_text(text, reply_markup=CANCEL)
     await cb.answer()
@@ -86,8 +87,8 @@ async def add_start(cb: CallbackQuery, state: FSMContext):
 async def add_username(message: Message, state: FSMContext):
     await state.update_data(username=message.text.strip())
     await state.set_state(AddAccount.password)
-    await message.answer("Шаг 2/2. Отправьте <b>пароль</b> (<code>OS_PASSWORD</code>).\n"
-                         "Сообщение с паролем будет удалено.", reply_markup=CANCEL)
+    await message.answer("2️⃣ Отправьте <b>пароль</b> (<code>OS_PASSWORD</code>).\n\n"
+                         "🔒 Сообщение с паролем бот сразу удалит.", reply_markup=CANCEL)
 
 
 @router.message(AddAccount.password)
@@ -113,7 +114,8 @@ async def _save(message: Message, state: FSMContext, username: str | None, secre
             info = await client.check()
     except Exception as e:
         await state.clear()
-        await wait.edit_text(f"❌ Не удалось войти: {hd.quote(str(e)[:500])}\n\nПопробуйте ещё раз.",
+        await wait.edit_text(f"❌ <b>Не удалось войти</b>\n\n<code>{hd.quote(str(e)[:500])}</code>\n\n"
+                             "🔁 Проверьте данные и попробуйте ещё раз.",
                              reply_markup=kb([Btn(text="🔁 Заново", callback_data=f"acc:add:{provider}")],
                                              back("accounts")))
         return
@@ -122,7 +124,8 @@ async def _save(message: Message, state: FSMContext, username: str | None, secre
     await db.add_account(message.from_user.id, provider, username, secret, project)
     await state.clear()
     await wait.edit_text(
-        f"✅ {PROVIDERS[provider]}: <code>{hd.quote(username)}</code> подключён.\n{hd.quote(info)}",
+        f"✅ <b>Аккаунт подключён!</b>\n\n☁️ {PROVIDERS[provider]}\n👤 <code>{hd.quote(username)}</code>\n"
+        f"ℹ️ {hd.quote(info)}",
         reply_markup=kb([Btn(text="🛒 Купить сервер", callback_data="buy")], back("menu", "🏠 Главное меню")),
     )
 

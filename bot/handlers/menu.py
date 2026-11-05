@@ -17,12 +17,12 @@ def _admin(user_id: int) -> bool:
 
 def welcome(name: str) -> str:
     return (
-        f"👋 Приветствую, <b><i>{hd.quote(name)}</i></b>\n\n"
-        "VPS Buyer — покупка облачных серверов с нужным IP в одном месте.\n\n"
-        "🟢 Подключи аккаунт провайдера\n"
-        "🟢 Выбери локацию и IP-подсеть\n"
-        "🟢 Бот докупает серверы, пока не выпадет нужный IP\n\n"
-        "Выберите нужный раздел ниже."
+        f"👋 Привет, <b>{hd.quote(name)}</b>!\n\n"
+        "🤖 <b>VPS Buyer</b> покупает облачные серверы с нужным IP.\n\n"
+        "🔑 Подключите аккаунт провайдера\n"
+        "📍 Выберите локацию и IP-блоки\n"
+        "🎯 Бот подбирает IP и присылает готовые серверы\n\n"
+        "👇 Выберите раздел"
     )
 
 
@@ -44,11 +44,11 @@ async def profile(cb: CallbackQuery):
     uid = cb.from_user.id
     text = (
         "👤 <b>Профиль</b>\n\n"
-        f"ID: <code>{uid}</code>\n"
-        f"Подключено аккаунтов: <b>{await db.count_accounts(uid)}</b>\n"
-        f"Куплено серверов: <b>{await db.count_servers(uid)}</b>"
+        f"🆔 ID: <code>{uid}</code>\n"
+        f"🔑 Аккаунтов: <b>{await db.count_accounts(uid)}</b>\n"
+        f"🖥 Серверов: <b>{await db.count_servers(uid)}</b>"
     )
-    await cb.message.edit_text(text, reply_markup=kb(back()))
+    await cb.message.edit_text(text, reply_markup=kb(back("menu", "🏠 Главное меню")))
     await cb.answer()
 
 
@@ -56,14 +56,14 @@ async def profile(cb: CallbackQuery):
 async def info(cb: CallbackQuery):
     text = (
         "ℹ️ <b>Как это работает</b>\n\n"
-        "1. «🔑 Аккаунты» → подключите аккаунт HostVDS (логин и пароль OpenStack) или Selectel VDS (API-токен).\n"
-        "2. «🛒 Купить сервер» → провайдер → аккаунт → локация.\n"
-        "3. Бот покажет доступные IP-подсети (например 94.x, 123.x, 207.x) — выберите нужную.\n"
-        "4. Укажите количество серверов, тариф и образ.\n"
-        "5. Бот создаёт серверы. Если IP не из выбранной подсети — сервер удаляется "
-        "и создаётся новый, пока не наберётся нужное количество.\n\n"
-        "⚠️ Каждое создание сервера может списывать деньги (почасовая оплата). "
-        "Есть лимит попыток — см. MAX_ATTEMPTS."
+        "1️⃣ <b>🔑 Аккаунты</b> — подключите HostVDS (логин и пароль OpenStack) или Selectel VDS (API-токен).\n\n"
+        "2️⃣ <b>🛒 Купить сервер</b> — провайдер → аккаунт → локация.\n\n"
+        "3️⃣ Отметьте нужные IP-блоки, например <code>95.182.87.#</code>. Можно сразу несколько.\n\n"
+        "4️⃣ Укажите количество, тариф, Network plan и ОС.\n\n"
+        "5️⃣ Бот подбирает IP и присылает каждый готовый сервер с паролем. Серверы с чужим IP удаляются.\n\n"
+        "☁️ <b>Мои серверы</b> — пароли, удаление и «🛠 Восстановить доступ».\n\n"
+        f"💸 Каждое создание сервера может стоить денег (почасовая оплата). "
+        f"Лимит попыток: <b>{config.max_attempts}</b>."
     )
-    await cb.message.edit_text(text, reply_markup=kb(back()))
+    await cb.message.edit_text(text, reply_markup=kb(back("menu", "🏠 Главное меню")))
     await cb.answer()

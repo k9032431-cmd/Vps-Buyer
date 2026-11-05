@@ -1,10 +1,15 @@
 """Minimal async client for the HostVDS cloud (OpenStack: Keystone, Nova, Neutron, Glance)."""
 import asyncio
+import base64
 import ipaddress
+import secrets
+import shlex
+import string
 import time
 from datetime import datetime
 
 import aiohttp
+from passlib.hash import sha512_crypt
 
 from . import hostvds_public as public
 from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24
@@ -13,6 +18,28 @@ COMPUTE_MICROVERSION = "compute 2.47"
 
 
 HostVDSError = ProviderError
+
+SECURITY_GROUP = "allow_all"   # the group the HostVDS panel attaches to every new server
+
+
+def make_password(length: int = 16) -> str:
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(length))
+        if any(c.islower() for c in pw) and any(c.isupper() for c in pw) and any(c.isdigit() for c in pw):
+            return pw
+
+
+def password_user_data(password: str, user: str = "root") -> str:
+    """Same script the HostVDS panel sends: set the root password (sha512 hash) once cloud-init has run.
+    HostVDS images ignore Nova's adminPass, so without this the password is unknown."""
+    pw_hash = sha512_crypt.using(rounds=5000).hash(password)
+    script = "\n".join([
+        "#!/bin/bash",
+        f"((sleep 15; printf %s {shlex.quote(f'{user}:{pw_hash}')} | chpasswd --encrypted) "
+        f"&& passwd -u {shlex.quote(user)})&",
+    ])
+    return base64.b64encode(script.encode()).decode()
 
 
 class HostVDSClient:
@@ -28,6 +55,7 @@ class HostVDSClient:
         self._expires: float = 0
         self._catalog: list[dict] = []
         self._session: aiohttp.ClientSession | None = None
+        self._sg: dict[str, str] = {}
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
@@ -94,16 +122,18 @@ class HostVDSClient:
         return url
 
     async def _request(self, method: str, service: str, region: str, path: str, *,
-                       json: dict | None = None, params: dict | None = None, _retry: bool = True):
+                       json: dict | None = None, params: dict | None = None, _retry: bool = True,
+                       microversion: str | None = None):
         await self._ensure_token()
         url = path if path.startswith("http") else self._endpoint(service, region) + path
         headers = {"X-Auth-Token": self._token, "Accept": "application/json"}
         if service == "compute":
-            headers["OpenStack-API-Version"] = COMPUTE_MICROVERSION
+            headers["OpenStack-API-Version"] = microversion or COMPUTE_MICROVERSION
         async with self._session.request(method, url, json=json, params=params, headers=headers) as r:
             if r.status == 401 and _retry:
                 self._token = None
-                return await self._request(method, service, region, path, json=json, params=params, _retry=False)
+                return await self._request(method, service, region, path, json=json, params=params, _retry=False,
+                                           microversion=microversion)
             if r.status >= 400:
                 raise HostVDSError(f"{method} {service}{path} → {r.status}: {(await r.text())[:300]}", r.status)
             if r.status == 204 or r.content_length == 0:
@@ -170,8 +200,34 @@ class HostVDSClient:
     # ---------- ports: free & fast way to pick an IP before buying a server ----------
     supports_ports = True
 
+    async def security_group(self, region: str) -> str:
+        """ID of the "allow_all" security group (created if missing) — without it every inbound
+        connection, SSH included, is dropped by the default group."""
+        cached = self._sg.get(region)
+        if cached:
+            return cached
+        groups = (await self._request("GET", "network", region, "/security-groups",
+                                      params={"name": SECURITY_GROUP}))["security_groups"]
+        if groups:
+            sg_id = groups[0]["id"]
+        else:
+            sg_id = (await self._request("POST", "network", region, "/security-groups", json={"security_group": {
+                "name": SECURITY_GROUP, "description": "Allow all inbound traffic (created by VPS Buyer)"}}
+            ))["security_group"]["id"]
+            for ethertype in ("IPv4", "IPv6"):
+                try:
+                    await self._request("POST", "network", region, "/security-group-rules", json={
+                        "security_group_rule": {"security_group_id": sg_id, "direction": "ingress",
+                                                "ethertype": ethertype}})
+                except HostVDSError as e:
+                    if e.status != 409:  # rule already exists
+                        raise
+        self._sg[region] = sg_id
+        return sg_id
+
     async def create_port(self, region: str, network_id: str, subnet_id: str | None) -> tuple[str, str | None]:
-        port: dict = {"network_id": network_id, "name": "ip-hunt"}
+        port: dict = {"network_id": network_id, "name": "ip-hunt",
+                      "security_groups": [await self.security_group(region)]}
         if subnet_id:
             port["fixed_ips"] = [{"subnet_id": subnet_id}]
         data = (await self._request("POST", "network", region, "/ports", json={"port": port}))["port"]
@@ -260,7 +316,11 @@ class HostVDSClient:
             networks = [{"port": port_id}]
         else:
             networks = [{"uuid": network_id}] if network_id else "auto"
-        server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks}
+        password = make_password()
+        server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks,
+                        "user_data": password_user_data(password)}
+        if not port_id:  # a port already carries its security group
+            server["security_groups"] = [{"name": await self.security_group(region)}]
         if metadata:  # e.g. {"network_plan": "unlim-shared-1000"} — how HostVDS picks the network plan
             server["metadata"] = {k: str(v) for k, v in metadata.items() if v}
         if flavor.disk_gb:
@@ -271,7 +331,27 @@ class HostVDSClient:
                 "volume_size": boot_volume_gb, "delete_on_termination": True,
             }]
         data = (await self._request("POST", "compute", region, "/servers", json={"server": server}))["server"]
-        return Server(data["id"], name, "BUILD", [], data.get("adminPass"))
+        return Server(data["id"], name, "BUILD", [], password)
+
+    async def repair_access(self, region: str, server_id: str) -> str:
+        """For servers bought before the fix: open the firewall (allow_all) and reinstall the same image
+        with a known root password. The IP stays the same. Returns the new password."""
+        sg_id = await self.security_group(region)
+        srv = (await self._request("GET", "compute", region, f"/servers/{server_id}"))["server"]
+        names = {g.get("name") for g in srv.get("security_groups") or []}
+        if SECURITY_GROUP not in names and sg_id not in names:
+            await self._request("POST", "compute", region, f"/servers/{server_id}/action",
+                                json={"addSecurityGroup": {"name": sg_id}})
+        image_id = (srv.get("image") or {}).get("id") if isinstance(srv.get("image"), dict) else None
+        if not image_id:
+            raise HostVDSError("Не удалось определить образ сервера для переустановки")
+        password = make_password()
+        rebuild = {"imageRef": image_id, "user_data": password_user_data(password)}
+        if srv.get("metadata"):
+            rebuild["metadata"] = srv["metadata"]
+        await self._request("POST", "compute", region, f"/servers/{server_id}/action",
+                            json={"rebuild": rebuild}, microversion="compute 2.57")
+        return password
 
     async def get_server(self, region: str, server_id: str) -> Server:
         s = (await self._request("GET", "compute", region, f"/servers/{server_id}"))["server"]

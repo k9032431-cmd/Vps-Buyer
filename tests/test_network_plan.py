@@ -71,6 +71,24 @@ def make_app(created):
     app.router.add_get("/image/v2/images", lambda r: web.json_response({"images": [
         {"id": "img-u22", "name": "Ubuntu 22.04 LTS"}]}))
 
+    sg = {"groups": [], "rules": []}
+
+    async def list_sg(req):
+        return web.json_response({"security_groups": [g for g in sg["groups"] if g["name"] == req.query.get("name")]})
+
+    async def create_sg(req):
+        g = dict((await req.json())["security_group"], id="sg-new")
+        sg["groups"].append(g)
+        return web.json_response({"security_group": g}, status=201)
+
+    async def create_rule(req):
+        sg["rules"].append((await req.json())["security_group_rule"])
+        return web.json_response({"security_group_rule": {"id": "r"}}, status=201)
+    app.router.add_get("/network/v2.0/security-groups", list_sg)
+    app.router.add_post("/network/v2.0/security-groups", create_sg)
+    app.router.add_post("/network/v2.0/security-group-rules", create_rule)
+    app["sg"] = sg
+
     async def create(req):
         body = (await req.json())["server"]
         created.append(body)
@@ -119,7 +137,7 @@ async def scenario():
         await ctx.set_data({"provider": "hostvds"})
         await dp.feed_update(bot, cb_update(1, f"buy:acc:{acc}"))
         text = s.texts()[-1]
-        assert "Доступно: 2 из 5" in text and "нет в наличии" in text, text
+        assert "Доступно: <b>2</b> из 5" in text and "нет в наличии" in text, text
         paris = (await ctx.get_data())["regions"].index("eu-west2")
         assert "🇫🇷 Париж · eu-west2" in (await ctx.get_data())["region_labels"].values()
         await dp.feed_update(bot, cb_update(2, f"buy:reg:{paris}"))
@@ -135,13 +153,13 @@ async def scenario():
         print("NETWORK PLAN BUTTONS:", plans_markup)
         assert plans_markup[:3] == ["⭐ Limited 50 Mbps · бесплатно", "Unlimited Shared 100 Mbps · €0.49/мес",
                                     "Unlimited Shared 1 Gbps · €0.99/мес"], plans_markup
-        assert "🔽 Все планы (4)" in plans_markup
+        assert "🔽 Показать все планы (4)" in plans_markup
         await dp.feed_update(bot, cb_update(7, "buy:npall"))
         await dp.feed_update(bot, cb_update(8, "buy:np:2"))         # Unlimited Shared 1 Gbps
         await dp.feed_update(bot, cb_update(9, "buy:img:0"))
         confirm = s.texts()[-1]
         print(confirm)
-        assert "Network plan: <b>Unlimited Shared 1 Gbps</b> · €0.99/мес" in confirm
+        assert "📶 Network plan: <b>Unlimited Shared 1 Gbps</b> · €0.99/мес" in confirm
         data = await ctx.get_data()
 
         # --- the server is created exactly like the HostVDS panel does it ---
@@ -154,6 +172,12 @@ async def scenario():
         body = created[-1]
         assert body["flavorRef"] == "flv-1" and body["imageRef"] == "img-u22"
         assert body["metadata"] == {"network_plan": "unlim-shared-1000", "os_distro": "ubuntu", "kind": "standard"}
+        # account had no allow_all group → the bot created it with inbound rules, like the panel's default
+        sg = srv.app["sg"]
+        assert [g["name"] for g in sg["groups"]] == ["allow_all"]
+        assert sorted(r["ethertype"] for r in sg["rules"]) == ["IPv4", "IPv6"]
+        assert all(r["direction"] == "ingress" for r in sg["rules"])
+        assert body["security_groups"] == [{"name": "sg-new"}] and body["user_data"]
         assert job.kept and job.kept[0].ipv4[0] == "95.182.87.40"
     finally:
         await srv.close()

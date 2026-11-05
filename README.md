@@ -28,8 +28,18 @@
    **Обычный режим (Selectel или если порты недоступны):** сервер создаётся, IP проверяется сразу,
    как только появляется (не дожидаясь загрузки), и чужой сервер тут же удаляется.
    Прогресс виден в сообщении, есть кнопка «⛔ Остановить».
-7. Каждый сервер с подходящим IP бот присылает **сразу, как только он готов** (IP и root-пароль),
-   и тут же сохраняет в «Мои серверы». В конце — короткий итог.
+7. Каждый сервер с подходящим IP бот присылает **сразу, как только он готов** (IP, root-пароль,
+   команда `ssh`) и тут же сохраняет в «Мои серверы». Итоговое сообщение повторяет IP и пароль
+   **каждого** сервера. Отправка повторяется при сбоях Telegram.
+
+**Доступ к серверам HostVDS** настраивается так же, как в панели HostVDS:
+- группа безопасности `allow_all` (если её нет в аккаунте — бот создаёт её с правилами на входящие
+  IPv4/IPv6). Без неё OpenStack ставит `default`, которая блокирует SSH;
+- пароль root задаётся скриптом в `user_data` (хэш sha512, `chpasswd --encrypted`) — образы HostVDS
+  не применяют `adminPass` от OpenStack. Пароль начинает работать примерно через минуту после запуска.
+
+Для серверов, купленных до этого исправления, в карточке сервера есть **«🛠 Восстановить доступ»**:
+добавляет `allow_all` и переустанавливает ту же систему с новым паролем (IP не меняется, диск стирается).
 
 **☁️ Мои серверы** — список купленных серверов. Нажмите на сервер: IP, пароль root и кнопка
 «🗑 Удалить сервер» (удаляет у провайдера, с подтверждением). Есть «🗑 Удалить все».
@@ -76,7 +86,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`
 
 ## Безопасность и деньги
 

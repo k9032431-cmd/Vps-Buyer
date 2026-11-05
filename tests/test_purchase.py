@@ -1,5 +1,6 @@
 """End-to-end test of the purchase loop against a fake OpenStack API."""
 import asyncio
+import base64
 
 from bot.config import config
 
@@ -30,6 +31,10 @@ def make_app(ip_sequence):
 
     async def create(req):
         body = await req.json()
+        # like the HostVDS panel: firewall group allow_all + root password set via user_data
+        assert body["server"]["security_groups"] == [{"name": "sg-allow"}], body
+        script = base64.b64decode(body["server"]["user_data"]).decode()
+        assert "chpasswd --encrypted" in script and "root:$6$" in script, script
         sid = f"s{len(servers) + 1}"
         servers[sid] = {"id": sid, "name": body["server"]["name"], "polls": 0, "ip": next(ips)}
         return web.json_response({"server": {"id": sid, "adminPass": "pw" + sid}}, status=202)
@@ -60,6 +65,11 @@ def make_app(ip_sequence):
     app.router.add_delete("/compute/servers/{id}", delete)
     app.router.add_get("/net/v2.0/networks", networks)
     app.router.add_get("/net/v2.0/subnets", subnets)
+
+    async def security_groups(req):
+        sgs = [{"id": "sg-allow", "name": "allow_all"}] if req.query.get("name") == "allow_all" else []
+        return web.json_response({"security_groups": sgs})
+    app.router.add_get("/net/v2.0/security-groups", security_groups)
     return app, deleted
 
 
@@ -71,6 +81,7 @@ def make_port_app(ip_sequence):
 
     async def create_port(req):
         body = (await req.json())["port"]
+        assert body["security_groups"] == ["sg-allow"], body
         st["port_posts"] += 1
         fixed = body.get("fixed_ips")
         ip = f"95.182.87.{st['port_posts']}" if fixed else next(ips)
@@ -88,6 +99,7 @@ def make_port_app(ip_sequence):
 
     async def create(req):
         body = (await req.json())["server"]
+        assert "security_groups" not in body and body["user_data"], "port carries the group"
         port = body["networks"][0]["port"]
         sid = f"s{len(st['servers']) + 1}"
         st["servers"][sid] = st["ports"][port]
@@ -181,7 +193,8 @@ async def scenario():
             print("\n".join(job.log))
             assert [s.ipv4[0] for s in job.kept] == ["94.103.80.11", "94.103.80.12"]
             assert sorted(deleted) == ["s1", "s2", "s4"], deleted
-            assert job.kept[0].admin_pass == "pws3"
+            pw = job.kept[0].admin_pass  # our own password (HostVDS ignores Nova's adminPass)
+            assert pw and len(pw) == 16 and pw != "pws3"
 
             # attempt limit is respected
             job2 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["8"], 1,

@@ -90,7 +90,7 @@ async def scenario():
         await dp.feed_update(bot, cb_update(11, "buy:img:0"))
         confirm = s.texts()[-1]
         print(confirm)
-        assert "Нужные IP: <code>94.103.80.#</code>, <code>95.182.84.#</code>, <code>95.182.87.#</code>, " \
+        assert "Ищем IP: <code>94.103.80.#</code>, <code>95.182.84.#</code>, <code>95.182.87.#</code>, " \
                "<code>5.188.#.#</code>" in confirm
 
         # buy: every found server is sent right away and saved to "My servers"
@@ -104,17 +104,33 @@ async def scenario():
             return job
         orig = buy.run_purchase
         buy.run_purchase = fake_run
+        # the first "found" message fails once (network hiccup) — it must be retried, not lost
+        from aiogram.exceptions import TelegramNetworkError
+        from aiogram.methods import SendMessage
+        real_request = s.make_request
+        failed = []
+
+        async def flaky(bot_, method, timeout=None):
+            if isinstance(method, SendMessage) and method.text.startswith("🎉") and not failed:
+                failed.append(1)
+                raise TelegramNetworkError(method=method, message="connection reset")
+            return await real_request(bot_, method, timeout)
+        s.make_request = flaky
         try:
             await dp.feed_update(bot, cb_update(20, "buy:go"))
-            for _ in range(20):
+            for _ in range(400):
                 await asyncio.sleep(0.01)
+                if any("Что дальше" in t for t in s.texts()):
+                    break
         finally:
             buy.run_purchase = orig
         texts = s.texts()
-        found_msgs = [t for t in texts if t.startswith("🎉 <b>Найден IP</b>")]
-        assert len(found_msgs) == 2 and "<code>95.182.87.5</code>" in found_msgs[0] and "Готово: 1/2" in found_msgs[0]
-        assert "<tg-spoiler>pw0</tg-spoiler>" in found_msgs[0]
-        assert any("Итого куплено 2" in t for t in texts)
+        found_msgs = [t for t in texts if t.startswith("🎉 <b>Нашёлся IP!</b>")]
+        assert failed == [1], "a send failure was simulated"
+        assert len(found_msgs) == 2 and "<code>95.182.87.5</code>" in found_msgs[0] and "(1/2)" in found_msgs[0]
+        assert "🔑 <code>pw0</code>" in found_msgs[0] and "<code>ssh root@95.182.87.5</code>" in found_msgs[0]
+        summary = next(t for t in texts if "Итого куплено: 2" in t)
+        assert "🔑 <code>pw0</code>" in summary and "🔑 <code>pw1</code>" in summary, "every password in summary"
         assert [r.ip for r in await db.list_servers(UID)] == ["94.103.80.9", "95.182.87.5"]
 
         # "select all" + reset (state was cleared by the purchase)

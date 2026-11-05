@@ -12,7 +12,7 @@ def back(to: str = "menu", text: str = "⬅️ Назад") -> list[Btn]:
 
 
 def main_menu(admin: bool = False) -> InlineKeyboardMarkup:
-    info_row = [Btn(text="ℹ️ Инфо", callback_data="info")]
+    info_row = [Btn(text="ℹ️ Как это работает", callback_data="info")]
     if admin:
         info_row.append(Btn(text="🔄 Обновить бота", callback_data="update"))
     return kb(

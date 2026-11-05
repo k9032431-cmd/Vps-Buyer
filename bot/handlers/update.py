@@ -20,24 +20,25 @@ def is_admin(user_id: int) -> bool:
 @router.callback_query(F.data == "update")
 async def update_bot(cb: CallbackQuery, dispatcher: Dispatcher, event_update: Update):
     if not is_admin(cb.from_user.id):
-        return await cb.answer("Только для админов (ADMIN_IDS)", show_alert=True)
+        return await cb.answer("🔒 Только для админов (ADMIN_IDS)", show_alert=True)
     if JOBS:
-        return await cb.answer("Сейчас идёт покупка серверов — дождитесь окончания.", show_alert=True)
+        return await cb.answer("⏳ Сейчас идёт покупка серверов — дождитесь окончания.", show_alert=True)
     await cb.answer()
     await cb.message.edit_text("⏳ Проверяю обновления…")
     try:
         result = await updater.update()
     except Exception as e:
-        await cb.message.edit_text(f"❌ Не удалось обновить:\n<code>{hd.quote(str(e))}</code>",
+        await cb.message.edit_text(f"❌ <b>Не удалось обновить</b>\n\n<code>{hd.quote(str(e)[:800])}</code>",
                                    reply_markup=kb(back()))
         return
     if not result.updated:
         version = await updater.current_version()
-        await cb.message.edit_text(f"✅ У вас уже последняя версия: <code>{hd.quote(version)}</code>",
+        await cb.message.edit_text(f"✅ <b>Уже последняя версия</b>\n\n🏷 <code>{hd.quote(version)}</code>",
                                    reply_markup=kb(back()))
         return
     changes = "\n".join(f"• {hd.quote(c)}" for c in result.changes[:15])
-    text = f"✅ <b>Бот обновлён</b> <code>{result.old}</code> → <code>{result.new}</code>\n\n{changes}"
+    text = (f"✅ <b>Бот обновлён</b>\n🏷 <code>{result.old}</code> → <code>{result.new}</code>\n\n"
+            f"📝 <b>Что нового:</b>\n{changes}")
     await cb.message.edit_text(text[:3900] + "\n\n♻️ Перезапускаюсь…")
     updater.save_notify(cb.from_user.id, text[:3900])
     RESTART["update_id"] = event_update.update_id
@@ -45,5 +46,5 @@ async def update_bot(cb: CallbackQuery, dispatcher: Dispatcher, event_update: Up
         await dispatcher.stop_polling()
     except RuntimeError:  # not running via polling
         RESTART.clear()
-        await cb.message.answer("Перезапустите бота вручную: <code>systemctl restart vps-buyer</code>")
+        await cb.message.answer("♻️ Перезапустите бота вручную: <code>systemctl restart vps-buyer</code>")
 
