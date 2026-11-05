@@ -124,7 +124,7 @@ async def scenario():
             assert flavors[0].price == "200 ₽/мес" and flavors[0].disk_gb == 20, flavors
             imgs = await c.list_images("spb0", flavors[0])
             assert [i.id for i in imgs] == ["ubuntu_22.04_64_001_master"]
-            job = PurchaseJob("spb0", flavors[0], imgs[0].id, None, "31", 2, max_attempts=10, parallel=2,
+            job = PurchaseJob("spb0", flavors[0], imgs[0].id, None, ["31"], 2, max_attempts=10, parallel=2,
                               active_timeout=30, boot_volume_gb=10)
             await run_purchase(c, job, lambda j: orig_sleep(0))
             print("\n".join(job.log))

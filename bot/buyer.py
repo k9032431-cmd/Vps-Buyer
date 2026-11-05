@@ -29,13 +29,14 @@ class PurchaseJob:
     flavor: Flavor
     image_id: str
     network_id: str | None
-    prefix: str
+    prefixes: list[str]          # wanted IP blocks, e.g. ["95.182.87", "94.103.80"] — any of them
     count: int
     max_attempts: int
     parallel: int
     active_timeout: int
     boot_volume_gb: int
-    subnet_id: str | None = None
+    targets: list[tuple[str | None, str | None]] = field(default_factory=list)  # (network, subnet) per prefix
+    on_found: Callable[[Server], Awaitable[None]] | None = None   # called as soon as a server is ready
     max_port_attempts: int = 500
     port_parallel: int = 10
     kept: list[Server] = field(default_factory=list)
@@ -49,8 +50,29 @@ class PurchaseJob:
     error: str | None = None
 
 
-def ip_matches(ip: str, prefix: str) -> bool:
-    return ip == prefix or ip.startswith(prefix.rstrip(".#").rstrip(".") + ".")
+def ip_matches(ip: str, prefixes: str | list[str]) -> bool:
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+    for prefix in prefixes:
+        prefix = prefix.rstrip(".#").rstrip(".")
+        if ip == prefix or ip.startswith(prefix + "."):
+            return True
+    return False
+
+
+def _port_targets(job: "PurchaseJob") -> list[tuple[str, str | None]]:
+    """Distinct (network, subnet) pairs to hunt ports on; a network-wide target makes subnets redundant."""
+    targets = [(n, s) for n, s in job.targets if n] or ([(job.network_id, None)] if job.network_id else [])
+    return list(dict.fromkeys(targets))
+
+
+async def _found(job: "PurchaseJob", server: Server) -> None:
+    job.kept.append(server)
+    if job.on_found:
+        try:
+            await job.on_found(server)
+        except Exception:
+            pass
 
 
 def _code(ip: str) -> str:
@@ -76,8 +98,10 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
         while len(good) < job.count and job.ports_checked < job.max_port_attempts and not job.cancelled:
             batch = min(job.port_parallel, job.max_port_attempts - job.ports_checked)
             first = job.ports_checked == 0
+            targets = _port_targets(job)
             results = await asyncio.gather(
-                *(client.create_port(job.region, job.network_id, job.subnet_id) for _ in range(batch)),
+                *(client.create_port(job.region, *targets[(job.ports_checked + i) % len(targets)])
+                  for i in range(batch)),
                 return_exceptions=True)
             job.ports_checked += batch
             if first and all(isinstance(r, BaseException) for r in results):
@@ -89,7 +113,7 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 port_id, ip = r
                 if ip:
                     job.seen.append(ip)
-                if ip and ip_matches(ip, job.prefix) and len(good) < job.count:
+                if ip and ip_matches(ip, job.prefixes) and len(good) < job.count:
                     good.append((port_id, ip))
                     job.log.append(f"🎯 {_code(ip)} — найден")
                 else:
@@ -121,8 +145,8 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
     if state.status == "ACTIVE":
         state.admin_pass = srv.admin_pass
         state.ipv4 = [ip] + [x for x in state.ipv4 if x != ip]
-        job.kept.append(state)
         job.log.append(f"✅ {_code(ip)} — сервер готов")
+        await _found(job, state)
         return
     await client.delete_server(job.region, srv.id)  # also releases the port
     job.deleted += 1
@@ -136,15 +160,15 @@ async def _try_server(client, job: PurchaseJob) -> None:
     try:
         state = await client.wait_ip(job.region, srv.id, job.active_timeout)
         job.seen += state.ipv4
-        good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefix)), None)
+        good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefixes)), None)
         if good and state.status != "ERROR" and len(job.kept) < job.count and not job.cancelled:
             if state.status != "ACTIVE":
                 state = await client.wait_active(job.region, srv.id, job.active_timeout)
             if state.status == "ACTIVE":
                 state.admin_pass = srv.admin_pass
                 state.ipv4 = [good] + [ip for ip in state.ipv4 if ip != good]
-                job.kept.append(state)
                 job.log.append(f"✅ {_code(good)} — оставлен")
+                await _found(job, state)
                 return
     except BaseException:
         await client.delete_server(job.region, srv.id)
@@ -158,7 +182,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
 
 async def run_purchase(client, job: PurchaseJob,
                        on_progress: Callable[[PurchaseJob], Awaitable[None]]) -> PurchaseJob:
-    if getattr(client, "supports_ports", False) and job.network_id:
+    if getattr(client, "supports_ports", False) and _port_targets(job):
         job.mode = "ports"
         good = await _hunt_ports(client, job, on_progress)
         if good is None:

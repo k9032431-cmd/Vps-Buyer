@@ -122,7 +122,7 @@ async def port_scenario():
     await server.start_server()
     try:
         async with HostVDSClient(str(server.make_url("/identity")), "u", "p", "u") as c:
-            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "94.103.80", 2,
+            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["94.103.80"], 2,
                               max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10, port_parallel=5)
             await run_purchase(c, job, lambda j: asyncio.sleep(0))
             print("\n".join(job.log))
@@ -133,14 +133,24 @@ async def port_scenario():
             assert sorted(st["deleted_ports"]) == ["p1", "p2", "p4"], st["deleted_ports"]  # wrong ones released
             assert "<code>94.103.80.11</code>" in "\n".join(job.log)
             # 2) exact /24 subnet → first try
-            job2 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "95.182.87", 1,
+            job2 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["95.182.87"], 1,
                                max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10,
-                               subnet_id="sub-95", port_parallel=1)
+                               targets=[("pub", "sub-95")], port_parallel=1)
             await run_purchase(c, job2, lambda j: asyncio.sleep(0))
             assert job2.ports_checked == 1 and job2.kept[0].ipv4[0].startswith("95.182.87.")
-            # 3) deleting a server also deletes its port
+            # 3) several wanted blocks: any of them counts, each server is reported right away
+            found = []
+            async def on_found(srv):
+                found.append(srv.ipv4[0])
+            job3 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["207.1.2", "123.45.0"], 3,
+                               max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10, port_parallel=2,
+                               targets=[("pub", None), ("pub", None)], on_found=on_found)
+            await run_purchase(c, job3, lambda j: asyncio.sleep(0))
+            assert len(job3.kept) == 3 and len(found) == 3, job3.log
+            assert all(ip.startswith(("207.1.2.", "123.45.0.")) for ip in found), found
+            # 4) deleting a server also deletes its port
             await c.delete_server("eu-west2", job2.kept[0].id)
-            assert st["deleted_ports"][-1] == "p6", st["deleted_ports"]
+            assert st["deleted_ports"][-1] == "p6", st["deleted_ports"]  # port of job2 server
     finally:
         await server.close()
 
@@ -160,7 +170,7 @@ async def scenario():
             assert [p.prefix for p in pools] == ["94.103.80", "123.45.0", "207.1.2"], pools
             assert pools[0].subnet_id == "sub-94.103.80.0/24"
             from bot.providers.hostvds import Flavor
-            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "94", 2,
+            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["94"], 2,
                               max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10)
             await run_purchase(c, job, lambda j: orig_sleep(0))
             print("\n".join(job.log))
@@ -169,7 +179,7 @@ async def scenario():
             assert job.kept[0].admin_pass == "pws3"
 
             # attempt limit is respected
-            job2 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "8", 1,
+            job2 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["8"], 1,
                                max_attempts=4, parallel=3, active_timeout=30, boot_volume_gb=10)
             await run_purchase(c, job2, lambda j: orig_sleep(0))
             assert job2.attempts == 4 and not job2.kept and job2.deleted == 4
