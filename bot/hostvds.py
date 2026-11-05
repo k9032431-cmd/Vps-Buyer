@@ -40,6 +40,15 @@ class IpPool:
 
 
 @dataclass
+class RegionStatus:
+    region: str
+    available: bool
+    reason: str
+    sample_ip: str | None
+    pools: list[IpPool]
+
+
+@dataclass
 class Server:
     id: str
     name: str
@@ -178,6 +187,43 @@ class HostVDSClient:
             pool = pools.setdefault(prefix, IpPool(prefix, s["network_id"], []))
             pool.cidrs.append(s["cidr"])
         return sorted(pools.values(), key=lambda p: int(p.prefix))
+
+    async def region_status(self, region: str) -> "RegionStatus":
+        """Checks whether servers can actually be ordered in a region."""
+        async def safe(coro):
+            try:
+                return await asyncio.wait_for(coro, 15)
+            except Exception as e:
+                return e
+
+        flavors, zones, limits, pools = await asyncio.gather(
+            safe(self.list_flavors(region)),
+            safe(self._request("GET", "compute", region, "/os-availability-zone")),
+            safe(self._request("GET", "compute", region, "/limits")),
+            safe(self.ip_pools(region)),
+        )
+        pools = pools if isinstance(pools, list) else []
+        sample_ip = None
+        if pools:
+            net = ipaddress.ip_network(pools[0].cidrs[0], strict=False)
+            sample_ip = str(next(net.hosts(), net.network_address))
+        st = RegionStatus(region, True, "", sample_ip, pools)
+
+        if isinstance(flavors, Exception):
+            st.available, st.reason = False, f"API недоступен ({flavors})"
+        elif not flavors:
+            st.available, st.reason = False, "нет тарифов"
+        elif isinstance(zones, dict):
+            info = zones.get("availabilityZoneInfo") or []
+            if info and not any(z.get("zoneState", {}).get("available") for z in info):
+                st.available, st.reason = False, "зона закрыта"
+        if st.available and isinstance(limits, dict):
+            a = limits.get("limits", {}).get("absolute", {})
+            max_i, used_i = a.get("maxTotalInstances", -1), a.get("totalInstancesUsed", 0)
+            max_c, used_c = a.get("maxTotalCores", -1), a.get("totalCoresUsed", 0)
+            if 0 <= max_i <= used_i or 0 <= max_c <= used_c:
+                st.available, st.reason = False, "исчерпан лимит"
+        return st
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int) -> Server:

@@ -9,7 +9,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton as Btn, Message
 from aiogram.utils.text_decorations import html_decoration as hd
 
-from .. import db
+from .. import db, geo
 from ..buyer import PurchaseJob, run_purchase
 from ..config import config
 from ..hostvds import Flavor, HostVDSError
@@ -65,22 +65,65 @@ async def choose_account(cb: CallbackQuery, state: FSMContext):
 
 
 # ---------- 3. location ----------
+# account_id -> (timestamp, [(region, label, available, reason)])
+_REGION_CACHE: dict[int, tuple[float, list[tuple[str, str, bool, str]]]] = {}
+REGION_CACHE_TTL = 300
+
+
+async def _load_regions(cb: CallbackQuery, state: FSMContext, provider: str) -> list[tuple[str, str, bool, str]]:
+    account_id = (await state.get_data())["account_id"]
+    cached = _REGION_CACHE.get(account_id)
+    if cached and time.time() - cached[0] < REGION_CACHE_TTL:
+        return cached[1]
+    async with await _client_for(cb, state) as client:
+        await client.authenticate()
+        statuses = await asyncio.gather(*(client.region_status(r) for r in client.regions()))
+    locations = await asyncio.gather(*(geo.locate(provider, s.region, s.sample_ip) for s in statuses))
+    result = [(s.region, f"{loc.flag} {loc.title} · {s.region}", s.available, s.reason)
+              for s, loc in zip(statuses, locations)]
+    _REGION_CACHE[account_id] = (time.time(), result)
+    return result
+
+
 @router.callback_query(F.data.startswith("buy:acc:"))
 async def choose_region(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(account_id=int(cb.data.split(":")[2]))
-    await cb.message.edit_text("⏳ Загружаю локации…")
+    await show_regions(cb, state, int(cb.data.split(":")[2]))
+
+
+async def show_regions(cb: CallbackQuery, state: FSMContext, account_id: int):
+    await state.update_data(account_id=account_id)
+    await cb.message.edit_text("⏳ Проверяю, в каких локациях можно купить сервер…")
     await cb.answer()
+    data = await state.get_data()
     try:
-        async with await _client_for(cb, state) as client:
-            await client.authenticate()
-            regions = client.regions()
+        regions = await _load_regions(cb, state, data.get("provider", "hostvds"))
     except Exception as e:
         return await _error(cb, e)
-    if not regions:
-        return await _error(cb, Exception("Нет доступных локаций"))
-    await state.update_data(regions=regions)
-    buttons = [Btn(text=f"📍 {r}", callback_data=f"buy:reg:{i}") for i, r in enumerate(regions)]
-    await cb.message.edit_text("📍 <b>Выберите локацию:</b>", reply_markup=kb(*grid(buttons), back("buy")))
+    available = [(r, label) for r, label, ok, _ in regions if ok]
+    unavailable = [(label, reason) for _, label, ok, reason in regions if not ok]
+    if not available:
+        text = "😔 Сейчас нет доступных локаций.\n\n" + "\n".join(
+            f"• {hd.quote(label)} — {hd.quote(reason)}" for label, reason in unavailable)
+        await cb.message.edit_text(text[:4000], reply_markup=kb(
+            [Btn(text="🔄 Проверить снова", callback_data=f"buy:refresh:{data['account_id']}")], back("buy")))
+        return
+    await state.update_data(regions=[r for r, _ in available], region_labels={r: label for r, label in available})
+    text = f"📍 <b>Выберите локацию</b>\n\nДоступно: {len(available)} из {len(regions)}"
+    if unavailable:
+        text += "\n\n<i>Недоступны:</i>\n" + "\n".join(
+            f"• {hd.quote(label)} — {hd.quote(reason[:60])}" for label, reason in unavailable)
+    buttons = [Btn(text=label, callback_data=f"buy:reg:{i}") for i, (_, label) in enumerate(available)]
+    await cb.message.edit_text(text[:4000], reply_markup=kb(
+        *grid(buttons, 1),
+        [Btn(text="🔄 Обновить", callback_data=f"buy:refresh:{data['account_id']}")],
+        back("buy")))
+
+
+@router.callback_query(F.data.startswith("buy:refresh:"))
+async def refresh_regions(cb: CallbackQuery, state: FSMContext):
+    account_id = int(cb.data.split(":")[2])
+    _REGION_CACHE.pop(account_id, None)
+    await show_regions(cb, state, account_id)
 
 
 # ---------- 4. IP pool ----------
@@ -88,8 +131,9 @@ async def choose_region(cb: CallbackQuery, state: FSMContext):
 async def choose_ip(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     region = data["regions"][int(cb.data.split(":")[2])]
-    await state.update_data(region=region)
-    await cb.message.edit_text(f"⏳ Проверяю, какие IP есть в <b>{hd.quote(region)}</b>…")
+    label = data["region_labels"][region]
+    await state.update_data(region=region, region_label=label)
+    await cb.message.edit_text(f"⏳ Проверяю, какие IP есть в <b>{hd.quote(label)}</b>…")
     await cb.answer()
     try:
         async with await _client_for(cb, state) as client:
@@ -100,7 +144,7 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     await state.update_data(pools=[asdict(p) for p in pools])
     lines = [f"• <b>{p.prefix}.x.x.x</b> — {', '.join(p.cidrs[:4])}{' …' if len(p.cidrs) > 4 else ''}"
              for p in pools]
-    text = f"🌐 <b>IP-подсети в {hd.quote(region)}</b>\n\n"
+    text = f"🌐 <b>IP-подсети в {hd.quote(label)}</b>\n\n"
     text += "\n".join(lines) if lines else "Не удалось получить список подсетей — укажите префикс вручную."
     text += "\n\nВыберите, какой IP нужен:"
     buttons = [Btn(text=f"{p.prefix}.x.x.x", callback_data=f"buy:ip:{i}") for i, p in enumerate(pools)]
@@ -225,7 +269,7 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
     text = (
         "🧾 <b>Подтверждение</b>\n\n"
         f"Провайдер: <b>{PROVIDERS[data['provider']]}</b>\n"
-        f"Локация: <b>{hd.quote(data['region'])}</b>\n"
+        f"Локация: <b>{hd.quote(data['region_label'])}</b>\n"
         f"Нужный IP: <b>{data['prefix']}.x</b>\n"
         f"Тариф: <b>{hd.quote(f['name'])}</b> ({f['vcpus']} vCPU, {f['ram_mb']} MB)\n"
         f"ОС: <b>{hd.quote(image['name'])}</b>\n"

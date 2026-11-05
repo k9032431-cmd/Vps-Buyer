@@ -27,6 +27,8 @@ class Config:
     active_timeout: int = int(os.getenv("ACTIVE_TIMEOUT", "300"))
     # Boot volume size (GB) used when a flavor has no local disk.
     boot_volume_gb: int = int(os.getenv("BOOT_VOLUME_GB", "10"))
+    # Manual location names, e.g. "eu-west1=NL:Amsterdam,us-west=US:Silicon Valley".
+    region_names: str = os.getenv("REGION_NAMES", "")
 
 
 config = Config()

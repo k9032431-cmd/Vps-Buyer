@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS servers (
     admin_pass TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS region_geo (
+    provider TEXT NOT NULL,
+    region TEXT NOT NULL,
+    country TEXT NOT NULL,
+    city TEXT NOT NULL,
+    PRIMARY KEY (provider, region)
+);
 """
 
 
@@ -119,3 +126,17 @@ async def list_servers(user_id: int, limit: int = 30) -> list[tuple[str, str, st
             "SELECT region, name, ip, created_at FROM servers WHERE user_id=? ORDER BY id DESC LIMIT ?",
             (user_id, limit),
         )).fetchall()
+
+
+async def get_region_geo(provider: str, region: str) -> tuple[str, str] | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        r = await (await db.execute(
+            "SELECT country, city FROM region_geo WHERE provider=? AND region=?", (provider, region))).fetchone()
+    return (r[0], r[1]) if r else None
+
+
+async def set_region_geo(provider: str, region: str, country: str, city: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute("INSERT OR REPLACE INTO region_geo (provider, region, country, city) VALUES (?,?,?,?)",
+                         (provider, region, country, city))
+        await db.commit()
