@@ -22,7 +22,22 @@ HostVDS работает на OpenStack (Keystone: `https://os-api.hostvds.com/i
 Нужны данные API из панели HostVDS (`openrc.sh`): `OS_USERNAME` (обычно `hostvds-<uuid>`, он же имя проекта)
 и `OS_PASSWORD`. Сообщение с паролем бот сразу удаляет, в БД пароль шифруется (если задан `ENCRYPTION_KEY`).
 
-## Запуск
+## Установка на сервер — одна команда
+
+На чистом Ubuntu/Debian сервере под root:
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/k9032431-cmd/Vps-Buyer/HEAD/install.sh)
+```
+
+Скрипт поставит Python и зависимости в `/opt/vps-buyer`, спросит токен бота и ваш Telegram ID,
+сам сгенерирует ключ шифрования и запустит бота как службу `vps-buyer` (автозапуск после перезагрузки).
+
+- Обновить бота — запустить ту же команду ещё раз (настройки сохраняются).
+- Удалить — та же команда с `uninstall` в конце.
+- Логи: `journalctl -u vps-buyer -f`, настройки: `/opt/vps-buyer/.env`.
+
+## Запуск вручную
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
