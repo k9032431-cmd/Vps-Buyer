@@ -61,18 +61,30 @@ async def delete(cb: CallbackQuery):
 
 CANCEL = kb(back("accounts", "❌ Отмена"))
 
+TOKEN_HELP = {
+    "selectel": ("1️⃣ Откройте vds.selectel.ru → <b>Настройки → API</b>.\n"
+                 "2️⃣ Создайте токен с правом на <b>запись</b>.\n"
+                 "3️⃣ Отправьте токен сюда."),
+    "timeweb": ("1️⃣ Откройте timeweb.cloud → <b>API и Terraform</b>.\n"
+                "2️⃣ Создайте токен (полный доступ, без ограничения по IP или с IP вашего сервера с ботом).\n"
+                "3️⃣ Отправьте токен сюда.\n\n"
+                "⚠️ Выключите <b>«Подтверждение удаления сервисов»</b> в настройках аккаунта — иначе Timeweb "
+                "просит код из Telegram при каждом удалении, и бот не сможет удалять серверы с чужим IP."),
+    "aeza": ("1️⃣ Откройте my.aeza.net → <b>Настройки → API</b>.\n"
+             "2️⃣ Создайте API-ключ.\n"
+             "3️⃣ Отправьте ключ сюда.\n\n"
+             "💡 Серверы заказываются с почасовой оплатой с баланса аккаунта."),
+}
+
 
 @router.callback_query(F.data.startswith("acc:add:"))
 async def add_start(cb: CallbackQuery, state: FSMContext):
     provider = cb.data.split(":")[2]
     await state.update_data(provider=provider)
-    if provider == "selectel":
+    if provider in TOKEN_HELP:
         await state.set_state(AddAccount.token)
-        text = ("➕ <b>Подключение Selectel VDS</b>\n\n"
-                "1️⃣ Откройте vds.selectel.ru → <b>Настройки → API</b>.\n"
-                "2️⃣ Создайте токен с правом на <b>запись</b>.\n"
-                "3️⃣ Отправьте токен сюда.\n\n"
-                "🔒 Сообщение с токеном бот сразу удалит.")
+        text = (f"➕ <b>Подключение {PROVIDERS[provider]}</b>\n\n" + TOKEN_HELP[provider]
+                + "\n\n🔒 Сообщение с ключом бот сразу удалит.")
     else:
         await state.set_state(AddAccount.username)
         text = ("➕ <b>Подключение HostVDS</b>\n\n"

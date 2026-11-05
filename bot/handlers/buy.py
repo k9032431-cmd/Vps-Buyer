@@ -15,7 +15,7 @@ from ..buyer import PurchaseJob, run_purchase
 from ..scanner import ScanJob, run_scan
 from ..config import config
 from .. import os_names
-from ..providers import Flavor, IpPool, ProviderError
+from ..providers import SCOUT_PROVIDERS, Flavor, IpPool, ProviderError
 from ..providers.base import prefix24
 from ..providers.hostvds_public import money
 from ..keyboards import PROVIDERS, back, grid, kb
@@ -178,7 +178,7 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
         text += ("🤷 Список подсетей пока неизвестен.\n"
                  "Бот запоминает IP, которые выдаёт провайдер, и после первой покупки покажет их здесь.\n"
                  "Пока добавьте IP вручную через «✏️ Свой IP»"
-                 + (" или нажмите «🔍 Разведать доступные IP»." if data.get("provider") == "selectel" else "."))
+                 + (" или нажмите «🔍 Разведать доступные IP»." if data.get("provider") in SCOUT_PROVIDERS else "."))
     if data.get("full_blocks"):
         text += f"\n\n🙈 <i>Скрыто блоков без свободных IP: {data['full_blocks']}</i>"
     if custom:
@@ -193,7 +193,7 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
         rows.append([Btn(text="☑️ Выбрать все", callback_data="buy:ipall"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
     rows.append([Btn(text="✏️ Свой IP", callback_data="buy:ip:custom")])
-    if data.get("provider") == "selectel":
+    if data.get("provider") in SCOUT_PROVIDERS:
         rows.append([Btn(text="🔍 Разведать доступные IP", callback_data="buy:scan")])
     if total:
         rows.append([Btn(text=f"➡️ Дальше · выбрано {total}", callback_data="buy:ipok")])
@@ -648,6 +648,7 @@ async def cancel(cb: CallbackQuery):
 
 # ---------- IP scouting (Selectel VDS: no subnet API) ----------
 SCAN_SIZES = (5, 10, 20)
+SCAN_CURRENCY = {"selectel": "₽", "timeweb": "₽", "aeza": "€"}
 
 
 @router.callback_query(F.data == "buy:scan")
@@ -666,18 +667,20 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
     choices, _ = os_names.simplify(images)
     image_id = choices[0].id if choices else images[0].id
     await state.update_data(scan={"flavor": asdict(flavor), "image_id": image_id, "hour": hour})
-    rows = [[Btn(text=f"🔍 {n} серверов · ≈{n * hour:.2f} ₽", callback_data=f"buy:scango:{n}")] for n in SCAN_SIZES]
+    cur = SCAN_CURRENCY.get(data["provider"], "₽")
+    rows = [[Btn(text=f"🔍 {n} серверов · ≈{n * hour:.2f} {cur}", callback_data=f"buy:scango:{n}")]
+            for n in SCAN_SIZES]
     rows.append([Btn(text=f"✏️ Своё число (до {config.scan_max})", callback_data="buy:scannum")])
     rows.append(back("buy:ipback", "⬅️ Назад к выбору IP"))
     await cb.message.edit_text(
         "🔍 <b>Разведка IP</b>\n"
         f"📍 {hd.quote(data['region_label'])}\n\n"
-        "У Selectel VDS нет списка подсетей, поэтому бот один раз проверит их сам:\n"
+        f"У {PROVIDERS[data['provider']]} нет списка подсетей, поэтому бот один раз проверит их сам:\n"
         "1️⃣ создаст самый дешёвый сервер\n"
         "2️⃣ запишет, какой IP он получил\n"
         "3️⃣ сразу удалит сервер и перейдёт к следующему\n"
         "4️⃣ в конце пришлёт отчёт: какие блоки <code>a.b.c.#</code> сейчас выдаются\n\n"
-        f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} ₽/час\n"
+        f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} {cur}/час\n"
         "💸 Оплата почасовая — каждый пробный сервер обходится примерно в час тарифа.\n\n"
         "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP.",
         reply_markup=kb(*rows))
@@ -696,10 +699,11 @@ async def scan_custom(cb: CallbackQuery, state: FSMContext):
         return await cb.answer("🔁 Откройте разведку заново", show_alert=True)
     await state.set_state(Buy.scan_count)
     hour = data["scan"]["hour"]
+    cur = SCAN_CURRENCY.get(data["provider"], "₽")
     await cb.message.edit_text(
         "✏️ <b>Сколько серверов проверить?</b>\n\n"
         f"Отправьте число от 1 до {config.scan_max}, например <code>100</code>.\n\n"
-        f"💸 Примерно {hour:g} ₽ за каждый сервер · 100 серверов ≈ {100 * hour:.2f} ₽\n"
+        f"💸 Примерно {hour:g} {cur} за каждый сервер · 100 серверов ≈ {100 * hour:.2f} {cur}\n"
         "⏱ Серверы проверяются по одному: создал → записал IP → удалил → следующий.",
         reply_markup=kb(back("buy:scan", "⬅️ Назад")))
     await cb.answer()

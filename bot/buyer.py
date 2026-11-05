@@ -68,6 +68,15 @@ def _port_targets(job: "PurchaseJob") -> list[tuple[str, str | None]]:
     return list(dict.fromkeys(targets))
 
 
+async def _finalize(client, job: "PurchaseJob", server: Server) -> None:
+    """Provider-specific last step for a kept server (Aeza: set a known root password)."""
+    if hasattr(client, "finalize"):
+        try:
+            server.admin_pass = await client.finalize(job.region, server.id) or server.admin_pass
+        except Exception:
+            logging.getLogger(__name__).exception("finalize failed for %s", server.id)
+
+
 async def _found(job: "PurchaseJob", server: Server) -> None:
     job.kept.append(server)
     if job.on_found:
@@ -145,9 +154,10 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
         raise
     state = await client.wait_active(job.region, srv.id, job.active_timeout)
     if state.status == "ACTIVE":
-        state.admin_pass = srv.admin_pass
+        state.admin_pass = state.admin_pass or srv.admin_pass
         state.ipv4 = [ip] + [x for x in state.ipv4 if x != ip]
         job.log.append(f"✅ {_code(ip)} — сервер готов")
+        await _finalize(client, job, state)
         await _found(job, state)
         return
     await client.delete_server(job.region, srv.id)  # also releases the port
@@ -168,9 +178,10 @@ async def _try_server(client, job: PurchaseJob) -> None:
             if state.status != "ACTIVE":
                 state = await client.wait_active(job.region, srv.id, job.active_timeout)
             if state.status == "ACTIVE":
-                state.admin_pass = srv.admin_pass
+                state.admin_pass = state.admin_pass or srv.admin_pass
                 state.ipv4 = [good] + [ip for ip in state.ipv4 if ip != good]
                 job.log.append(f"✅ {_code(good)} — подходит, оставлен")
+                await _finalize(client, job, state)
                 await _found(job, state)
                 return
     except BaseException:

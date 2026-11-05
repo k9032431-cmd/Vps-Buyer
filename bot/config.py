@@ -23,6 +23,8 @@ class Config:
     hostvds_auth_url: str = os.getenv("HOSTVDS_AUTH_URL", "https://os-api.hostvds.com/identity")
     hostvds_public_api: str = os.getenv("HOSTVDS_PUBLIC_API", "https://hostvds.com/api")
     selectel_api_url: str = os.getenv("SELECTEL_API_URL", "https://api.vscale.io/v1")
+    timeweb_api_url: str = os.getenv("TIMEWEB_API_URL", "https://api.timeweb.cloud")
+    aeza_api_url: str = os.getenv("AEZA_API_URL", "https://my.aeza.net/api")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "50"))
     # Fast mode (HostVDS): max free port checks per job and how many at once.
