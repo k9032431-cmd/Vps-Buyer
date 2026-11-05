@@ -11,16 +11,17 @@ def back(to: str = "menu", text: str = "⬅️ Назад") -> list[Btn]:
     return [Btn(text=text, callback_data=to)]
 
 
-def main_menu(admin: bool = False) -> InlineKeyboardMarkup:
-    info_row = [Btn(text="ℹ️ Как это работает", callback_data="info")]
-    if admin:
-        info_row.append(Btn(text="🔄 Обновить бота", callback_data="update"))
-    return kb(
+def main_menu(admin: bool = False, pending: int = 0) -> InlineKeyboardMarkup:
+    rows = [
         [Btn(text="☁️ Мои серверы", callback_data="servers")],
         [Btn(text="👤 Профиль", callback_data="profile"), Btn(text="🔑 Аккаунты", callback_data="accounts")],
-        info_row,
-        [Btn(text="🛒 Купить сервер", callback_data="buy")],
-    )
+        [Btn(text="ℹ️ Как это работает", callback_data="info")],
+    ]
+    if admin:
+        rows.append([Btn(text=f"👥 Пользователи{f' · 🙋 {pending}' if pending else ''}", callback_data="users"),
+                     Btn(text="🔄 Обновить бота", callback_data="update")])
+    rows.append([Btn(text="🛒 Купить сервер", callback_data="buy")])
+    return kb(*rows)
 
 
 def grid(buttons: list[Btn], cols: int = 2) -> list[list[Btn]]:

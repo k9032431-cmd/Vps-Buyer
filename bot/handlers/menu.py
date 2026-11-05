@@ -15,6 +15,11 @@ def _admin(user_id: int) -> bool:
     return user_id in config.admin_ids
 
 
+async def _menu(user_id: int):
+    admin = _admin(user_id)
+    return main_menu(admin, len(await db.list_users("pending")) if admin else 0)
+
+
 def welcome(name: str) -> str:
     return (
         f"👋 Привет, <b>{hd.quote(name)}</b>!\n\n"
@@ -29,13 +34,13 @@ def welcome(name: str) -> str:
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(welcome(message.from_user.full_name), reply_markup=main_menu(_admin(message.from_user.id)))
+    await message.answer(welcome(message.from_user.full_name), reply_markup=await _menu(message.from_user.id))
 
 
 @router.callback_query(F.data == "menu")
 async def menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text(welcome(cb.from_user.full_name), reply_markup=main_menu(_admin(cb.from_user.id)))
+    await cb.message.edit_text(welcome(cb.from_user.full_name), reply_markup=await _menu(cb.from_user.id))
     await cb.answer()
 
 

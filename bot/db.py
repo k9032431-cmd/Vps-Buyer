@@ -47,6 +47,15 @@ CREATE TABLE IF NOT EXISTS servers (
     admin_pass TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL DEFAULT '',
+    full_name TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,              -- pending | approved | denied
+    requested_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    decided_at TEXT,
+    decided_by INTEGER
+);
 CREATE TABLE IF NOT EXISTS ip_seen (
     provider TEXT NOT NULL,
     region TEXT NOT NULL,
@@ -198,3 +207,51 @@ async def update_server_password(user_id: int, row_id: int, password: str) -> No
     async with aiosqlite.connect(config.db_path) as db:
         await db.execute("UPDATE servers SET admin_pass=? WHERE id=? AND user_id=?", (_enc(password), row_id, user_id))
         await db.commit()
+
+
+# ---------- access (users approved by an admin) ----------
+@dataclass
+class BotUser:
+    user_id: int
+    username: str
+    full_name: str
+    status: str
+    requested_at: str
+    decided_at: str | None
+
+
+_USER_COLS = "user_id, username, full_name, status, requested_at, decided_at"
+
+
+async def get_user(user_id: int) -> BotUser | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        r = await (await db.execute(f"SELECT {_USER_COLS} FROM users WHERE user_id=?", (user_id,))).fetchone()
+    return BotUser(*r) if r else None
+
+
+async def request_access(user_id: int, username: str, full_name: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, username, full_name, status) VALUES (?,?,?, 'pending') "
+            "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, full_name=excluded.full_name, "
+            "status='pending', requested_at=CURRENT_TIMESTAMP, decided_at=NULL, decided_by=NULL",
+            (user_id, username, full_name))
+        await db.commit()
+
+
+async def set_user_status(user_id: int, status: str, admin_id: int, username: str = "", full_name: str = "") -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "INSERT INTO users (user_id, username, full_name, status, decided_at, decided_by) "
+            "VALUES (?,?,?,?, CURRENT_TIMESTAMP, ?) "
+            "ON CONFLICT(user_id) DO UPDATE SET status=excluded.status, decided_at=CURRENT_TIMESTAMP, "
+            "decided_by=excluded.decided_by",
+            (user_id, username, full_name, status, admin_id))
+        await db.commit()
+
+
+async def list_users(status: str) -> list[BotUser]:
+    async with aiosqlite.connect(config.db_path) as db:
+        rows = await (await db.execute(
+            f"SELECT {_USER_COLS} FROM users WHERE status=? ORDER BY requested_at DESC", (status,))).fetchall()
+    return [BotUser(*r) for r in rows]

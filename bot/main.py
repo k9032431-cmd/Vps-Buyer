@@ -1,26 +1,16 @@
 import asyncio
 import logging
 
-from aiogram import BaseMiddleware, Bot, Dispatcher
+from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from . import db, updater
 from .config import config
-from .handlers import accounts, buy, menu, servers, update
+from .handlers import access, accounts, buy, menu, servers, update
 
 log = logging.getLogger(__name__)
-
-
-class AccessMiddleware(BaseMiddleware):
-    """Drops updates from users not in ADMIN_IDS (when ADMIN_IDS is set)."""
-
-    async def __call__(self, handler, event, data):
-        user = data.get("event_from_user")
-        if config.admin_ids and (not user or user.id not in config.admin_ids):
-            return None
-        return await handler(event, data)
 
 
 async def main() -> None:
@@ -28,15 +18,15 @@ async def main() -> None:
     if not config.bot_token:
         raise SystemExit("BOT_TOKEN не задан (см. .env.example)")
     if not config.admin_ids:
-        log.warning("ADMIN_IDS пуст — бот доступен всем пользователям Telegram!")
+        log.warning("ADMIN_IDS пуст — бот открыт для всех! Укажите свой Telegram ID, чтобы включить доступ по приглашению.")
     if not config.encryption_key:
         log.warning("ENCRYPTION_KEY не задан — пароли аккаунтов хранятся в БД открытым текстом.")
     await db.init_db()
 
     bot = Bot(config.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
-    dp.update.outer_middleware(AccessMiddleware())
-    dp.include_routers(menu.router, accounts.router, servers.router, buy.router, update.router)
+    dp.update.outer_middleware(access.AccessMiddleware())
+    dp.include_routers(access.router, menu.router, accounts.router, servers.router, buy.router, update.router)
 
     notify = updater.pop_notify()
     if notify:

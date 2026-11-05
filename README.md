@@ -86,11 +86,23 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`
+
+## Доступ по приглашению
+
+- **Админы** — Telegram ID из `ADMIN_IDS`: всегда имеют доступ.
+- **Все остальные** при `/start` видят описание бота и две кнопки: «🙋 Запросить доступ» и
+  «💬 Написать админу» (ссылка на `ADMIN_CONTACT`, по умолчанию `@oldarsi`). Остальные кнопки и
+  команды для них не работают.
+- Запрос приходит каждому админу с кнопками **✅ Разрешить / ❌ Отклонить**; пользователь сразу
+  получает уведомление о решении. Повторный запрос — не чаще раза в час.
+- **👥 Пользователи** (в меню админа, со счётчиком новых запросов): ожидающие запросы, список
+  пользователей с доступом и кнопка «🚫 Забрать доступ», а также «➕ Добавить по ID».
+- У каждого пользователя свои аккаунты провайдеров и свои серверы.
 
 ## Безопасность и деньги
 
-- `ADMIN_IDS` — обязательно укажите свой Telegram ID, иначе ботом сможет пользоваться кто угодно.
+- `ADMIN_IDS` — обязательно укажите свой Telegram ID. Если список пуст, бот открыт для всех.
 - `MAX_ATTEMPTS` — максимум созданий серверов за одну задачу (включая удалённые). У провайдера
   почасовая оплата, каждое создание/удаление может списывать деньги.
 - При ошибках квоты/баланса (HTTP 402/403/413) бот сразу останавливается.

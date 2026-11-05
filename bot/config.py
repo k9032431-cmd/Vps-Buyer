@@ -15,6 +15,8 @@ class Config:
     bot_token: str = os.getenv("BOT_TOKEN", "")
     # Only these Telegram user IDs may use the bot (it spends real money).
     admin_ids: set[int] = field(default_factory=lambda: _ids(os.getenv("ADMIN_IDS", "")))
+    # Telegram username people without access are sent to (no @).
+    admin_contact: str = os.getenv("ADMIN_CONTACT", "oldarsi").lstrip("@")
     db_path: str = os.getenv("DB_PATH", "data/bot.db")
     # Fernet key used to encrypt stored provider passwords.
     encryption_key: str = os.getenv("ENCRYPTION_KEY", "")
