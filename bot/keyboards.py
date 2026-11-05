@@ -1,6 +1,6 @@
 from aiogram.types import InlineKeyboardButton as Btn, InlineKeyboardMarkup
 
-PROVIDERS = {"hostvds": "HostVDS"}
+from .providers import PROVIDERS  # noqa: F401  (re-exported)
 
 
 def kb(*rows: list[Btn]) -> InlineKeyboardMarkup:

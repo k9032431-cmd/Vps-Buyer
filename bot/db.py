@@ -47,6 +47,12 @@ CREATE TABLE IF NOT EXISTS servers (
     admin_pass TEXT,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS ip_seen (
+    provider TEXT NOT NULL,
+    region TEXT NOT NULL,
+    ip TEXT NOT NULL,
+    PRIMARY KEY (provider, region, ip)
+);
 CREATE TABLE IF NOT EXISTS region_geo (
     provider TEXT NOT NULL,
     region TEXT NOT NULL,
@@ -172,3 +178,17 @@ async def set_region_geo(provider: str, region: str, country: str, city: str) ->
         await db.execute("INSERT OR REPLACE INTO region_geo (provider, region, country, city) VALUES (?,?,?,?)",
                          (provider, region, country, city))
         await db.commit()
+
+
+async def add_seen_ips(provider: str, region: str, ips: list[str]) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.executemany("INSERT OR IGNORE INTO ip_seen (provider, region, ip) VALUES (?,?,?)",
+                             [(provider, region, ip) for ip in ips])
+        await db.commit()
+
+
+async def seen_ips(provider: str, region: str) -> list[str]:
+    async with aiosqlite.connect(config.db_path) as db:
+        rows = await (await db.execute(
+            "SELECT ip FROM ip_seen WHERE provider=? AND region=?", (provider, region))).fetchall()
+    return [r[0] for r in rows]

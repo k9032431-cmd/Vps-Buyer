@@ -7,7 +7,7 @@ from aiohttp.test_utils import TestServer
 
 from bot import db, geo
 from bot.config import config
-from bot.hostvds import HostVDSClient
+from bot.providers.hostvds import HostVDSClient
 
 FLAVORS = {"eu-west1": [{"id": "1", "name": "s", "vcpus": 1, "ram": 1024, "disk": 10}], "eu-north1": [],
            "us-west": [{"id": "1", "name": "s", "vcpus": 1, "ram": 1024, "disk": 10}]}

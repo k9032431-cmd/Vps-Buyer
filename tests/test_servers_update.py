@@ -27,7 +27,8 @@ class FakeSession(BaseSession):
     async def make_request(self, bot, method, timeout=None):
         self.calls.append(method)
         if isinstance(method, SendMessage):
-            return Message(message_id=1, date=datetime.now(), chat=Chat(id=UID, type="private"), text=method.text)
+            return Message(message_id=1, date=datetime.now(), chat=Chat(id=UID, type="private"),
+                           text=method.text).as_(bot)
         return True
 
     async def stream_content(self, *a, **k):

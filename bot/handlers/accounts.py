@@ -4,9 +4,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton as Btn, Message
 from aiogram.utils.text_decorations import html_decoration as hd
 
-from .. import db
-from ..config import config
-from ..hostvds import HostVDSClient, HostVDSError
+from .. import db, providers
 from ..keyboards import PROVIDERS, back, kb
 
 router = Router()
@@ -15,27 +13,33 @@ router = Router()
 class AddAccount(StatesGroup):
     username = State()
     password = State()
+    token = State()
 
 
-def make_client(acc: db.Account) -> HostVDSClient:
-    return HostVDSClient(config.hostvds_auth_url, acc.username, acc.password, acc.project_name)
+def make_client(acc: db.Account):
+    return providers.make_client(acc.provider, acc.username, acc.password, acc.project_name)
 
 
-async def accounts_view(user_id: int, provider: str = "hostvds", select_prefix: str | None = None):
-    """Account list. If select_prefix is set, buttons pick an account (used by the buy flow)."""
-    accounts = await db.list_accounts(user_id, provider)
-    rows = []
-    for a in accounts:
-        if select_prefix:
-            rows.append([Btn(text=f"🔑 {a.username}", callback_data=f"{select_prefix}{a.id}")])
-        else:
-            rows.append([Btn(text=f"🔑 {a.username}", callback_data="noop"),
-                         Btn(text="🗑", callback_data=f"acc:del:{a.id}")])
-    rows.append([Btn(text="➕ Подключить аккаунт", callback_data=f"acc:add:{provider}")])
+async def accounts_view(user_id: int, provider: str | None = None, select_prefix: str | None = None):
+    """Account list. provider=None → all providers. select_prefix → buttons pick an account (buy flow)."""
+    shown = [provider] if provider else list(PROVIDERS)
+    rows, total = [], 0
+    for prov in shown:
+        accounts = await db.list_accounts(user_id, prov)
+        total += len(accounts)
+        for a in accounts:
+            label = f"🔑 {a.username}" if provider else f"🔑 {PROVIDERS[prov]} · {a.username}"
+            if select_prefix:
+                rows.append([Btn(text=label, callback_data=f"{select_prefix}{a.id}")])
+            else:
+                rows.append([Btn(text=label, callback_data="noop"), Btn(text="🗑", callback_data=f"acc:del:{a.id}")])
+    for prov in shown:
+        rows.append([Btn(text=f"➕ Подключить {PROVIDERS[prov]}", callback_data=f"acc:add:{prov}")])
     rows.append(back("buy" if select_prefix else "menu"))
-    text = f"🔑 <b>Аккаунты {PROVIDERS[provider]}</b>\n\n"
-    text += "Выберите аккаунт:" if select_prefix and accounts else (
-        f"Подключено: {len(accounts)}" if accounts else "Нет подключённых аккаунтов.")
+    title = PROVIDERS[provider] if provider else "провайдеров"
+    text = f"🔑 <b>Аккаунты {title}</b>\n\n"
+    text += "Выберите аккаунт:" if select_prefix and total else (
+        f"Подключено: {total}" if total else "Нет подключённых аккаунтов.")
     return text, kb(*rows)
 
 
@@ -55,17 +59,26 @@ async def delete(cb: CallbackQuery):
     await cb.answer("Удалено")
 
 
+CANCEL = kb(back("accounts", "❌ Отмена"))
+
+
 @router.callback_query(F.data.startswith("acc:add:"))
 async def add_start(cb: CallbackQuery, state: FSMContext):
-    await state.set_state(AddAccount.username)
-    await state.update_data(provider=cb.data.split(":")[2])
-    await cb.message.edit_text(
-        "➕ <b>Подключение HostVDS</b>\n\n"
-        "Нужны данные OpenStack API из панели HostVDS (файл <code>openrc.sh</code> / раздел API).\n\n"
-        "Шаг 1/2. Отправьте <b>логин</b> (<code>OS_USERNAME</code>, обычно вида "
-        "<code>hostvds-xxxxxxxx-...</code>).",
-        reply_markup=kb(back("accounts", "❌ Отмена")),
-    )
+    provider = cb.data.split(":")[2]
+    await state.update_data(provider=provider)
+    if provider == "selectel":
+        await state.set_state(AddAccount.token)
+        text = ("➕ <b>Подключение Selectel VDS</b>\n\n"
+                "1. Откройте панель vds.selectel.ru → <b>Настройки → API</b> (токены).\n"
+                "2. Создайте токен с правом на <b>запись</b>.\n"
+                "3. Отправьте токен сюда. Сообщение с токеном будет удалено.")
+    else:
+        await state.set_state(AddAccount.username)
+        text = ("➕ <b>Подключение HostVDS</b>\n\n"
+                "Нужны данные OpenStack API из панели HostVDS (файл <code>openrc.sh</code> / раздел API).\n\n"
+                "Шаг 1/2. Отправьте <b>логин</b> (<code>OS_USERNAME</code>, обычно вида "
+                "<code>hostvds-xxxxxxxx-...</code>).")
+    await cb.message.edit_text(text, reply_markup=CANCEL)
     await cb.answer()
 
 
@@ -74,35 +87,42 @@ async def add_username(message: Message, state: FSMContext):
     await state.update_data(username=message.text.strip())
     await state.set_state(AddAccount.password)
     await message.answer("Шаг 2/2. Отправьте <b>пароль</b> (<code>OS_PASSWORD</code>).\n"
-                         "Сообщение с паролем будет удалено.", reply_markup=kb(back("accounts", "❌ Отмена")))
+                         "Сообщение с паролем будет удалено.", reply_markup=CANCEL)
 
 
 @router.message(AddAccount.password)
 async def add_password(message: Message, state: FSMContext):
-    password = message.text.strip()
+    data = await state.get_data()
+    await _save(message, state, data["username"], message.text.strip(), data["username"])
+
+
+@router.message(AddAccount.token)
+async def add_token(message: Message, state: FSMContext):
+    await _save(message, state, None, message.text.strip(), "")
+
+
+async def _save(message: Message, state: FSMContext, username: str | None, secret: str, project: str):
     try:
         await message.delete()
     except Exception:
         pass
-    data = await state.get_data()
-    username = data["username"]
-    acc = db.Account(0, message.from_user.id, data["provider"], username, password, username)
+    provider = (await state.get_data())["provider"]
     wait = await message.answer("⏳ Проверяю доступ…")
     try:
-        async with make_client(acc) as client:
-            await client.authenticate()
-            regions = client.regions()
-    except (HostVDSError, Exception) as e:
-        await wait.edit_text(f"❌ Не удалось войти: {hd.quote(str(e))}\n\nПопробуйте ещё раз.",
-                             reply_markup=kb([Btn(text="🔁 Заново", callback_data=f"acc:add:{data['provider']}")],
-                                             back("accounts")))
+        async with providers.make_client(provider, username or "", secret, project) as client:
+            info = await client.check()
+    except Exception as e:
         await state.clear()
+        await wait.edit_text(f"❌ Не удалось войти: {hd.quote(str(e)[:500])}\n\nПопробуйте ещё раз.",
+                             reply_markup=kb([Btn(text="🔁 Заново", callback_data=f"acc:add:{provider}")],
+                                             back("accounts")))
         return
-    await db.add_account(message.from_user.id, data["provider"], username, password, username)
+    if username is None:  # token-based: name the account by the info from the API
+        username = info.split(",")[0][:40] or f"…{secret[-6:]}"
+    await db.add_account(message.from_user.id, provider, username, secret, project)
     await state.clear()
     await wait.edit_text(
-        f"✅ Аккаунт <code>{hd.quote(username)}</code> подключён.\n"
-        f"Доступные локации: {', '.join(regions) or '—'}",
+        f"✅ {PROVIDERS[provider]}: <code>{hd.quote(username)}</code> подключён.\n{hd.quote(info)}",
         reply_markup=kb([Btn(text="🛒 Купить сервер", callback_data="buy")], back("menu", "🏠 Главное меню")),
     )
 

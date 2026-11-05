@@ -68,10 +68,13 @@ async def _lookup(ip: str) -> Location | None:
     return None
 
 
-async def locate(provider: str, region: str, sample_ip: str | None) -> Location:
+async def locate(provider: str, region: str, sample_ip: str | None,
+                 known_country: str = "", known_city: str = "") -> Location:
     override = _overrides().get(region)
     if override:
         return override
+    if known_country:
+        return Location(known_country, known_city)
     cached = await db.get_region_geo(provider, region)
     if cached:
         return Location(*cached)

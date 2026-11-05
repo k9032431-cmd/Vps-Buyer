@@ -19,6 +19,7 @@ class Config:
     # Fernet key used to encrypt stored provider passwords.
     encryption_key: str = os.getenv("ENCRYPTION_KEY", "")
     hostvds_auth_url: str = os.getenv("HOSTVDS_AUTH_URL", "https://os-api.hostvds.com/identity")
+    selectel_api_url: str = os.getenv("SELECTEL_API_URL", "https://api.vscale.io/v1")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "50"))
     # How many servers are created at the same time.

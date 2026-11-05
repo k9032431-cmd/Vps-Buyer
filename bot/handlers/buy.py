@@ -12,7 +12,7 @@ from aiogram.utils.text_decorations import html_decoration as hd
 from .. import db, geo
 from ..buyer import PurchaseJob, run_purchase
 from ..config import config
-from ..hostvds import Flavor, HostVDSError
+from ..providers import Flavor, IpPool, ProviderError
 from ..keyboards import PROVIDERS, back, grid, kb
 from .accounts import accounts_view, make_client
 
@@ -34,7 +34,7 @@ async def _client_for(cb_or_msg, state: FSMContext):
     data = await state.get_data()
     acc = await db.get_account(cb_or_msg.from_user.id, data["account_id"])
     if not acc:
-        raise HostVDSError("Аккаунт не найден")
+        raise ProviderError("Аккаунт не найден")
     return make_client(acc)
 
 
@@ -76,9 +76,9 @@ async def _load_regions(cb: CallbackQuery, state: FSMContext, provider: str) -> 
     if cached and time.time() - cached[0] < REGION_CACHE_TTL:
         return cached[1]
     async with await _client_for(cb, state) as client:
-        await client.authenticate()
-        statuses = await asyncio.gather(*(client.region_status(r) for r in client.regions()))
-    locations = await asyncio.gather(*(geo.locate(provider, s.region, s.sample_ip) for s in statuses))
+        statuses = await client.region_statuses()
+    locations = await asyncio.gather(*(geo.locate(provider, s.region, s.sample_ip, s.country, s.city)
+                                       for s in statuses))
     result = [(s.region, f"{loc.flag} {loc.title} · {s.region}", s.available, s.reason)
               for s, loc in zip(statuses, locations)]
     _REGION_CACHE[account_id] = (time.time(), result)
@@ -141,16 +141,32 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         log.warning("ip_pools failed: %s", e)
         pools = []
+    pools = _merge_seen(pools, await db.seen_ips(data["provider"], region))
     await state.update_data(pools=[asdict(p) for p in pools])
     lines = [f"• <b>{p.prefix}.x.x.x</b> — {', '.join(p.cidrs[:4])}{' …' if len(p.cidrs) > 4 else ''}"
              for p in pools]
     text = f"🌐 <b>IP-подсети в {hd.quote(label)}</b>\n\n"
-    text += "\n".join(lines) if lines else "Не удалось получить список подсетей — укажите префикс вручную."
+    text += "\n".join(lines) if lines else (
+        "Список подсетей пока неизвестен — бот запоминает IP, которые выдаёт провайдер, "
+        "и после первой покупки покажет их здесь. Сейчас укажите префикс вручную.")
     text += "\n\nВыберите, какой IP нужен:"
     buttons = [Btn(text=f"{p.prefix}.x.x.x", callback_data=f"buy:ip:{i}") for i, p in enumerate(pools)]
     rows = grid(buttons, 3) + [[Btn(text="✏️ Свой префикс (напр. 94.103)", callback_data="buy:ip:custom")],
                                back(f"buy:acc:{data['account_id']}")]
     await cb.message.edit_text(text, reply_markup=kb(*rows))
+
+
+def _merge_seen(pools: list[IpPool], seen: list[str]) -> list[IpPool]:
+    """Adds prefixes of IPs the provider gave out before (for providers without a subnet API)."""
+    known = {p.prefix: p for p in pools}
+    for ip in seen:
+        prefix = ip.split(".")[0]
+        if prefix not in known:
+            known[prefix] = IpPool(prefix, None, [])
+        pool = known[prefix]
+        if pool.network_id is None and len(pool.cidrs) < 5 and ip not in pool.cidrs:
+            pool.cidrs.append(ip)
+    return sorted(known.values(), key=lambda p: int(p.prefix))
 
 
 @router.callback_query(F.data == "buy:ip:custom")
@@ -230,7 +246,8 @@ async def show_flavors(msg: Message, state: FSMContext, user_id: int):
     flavors = flavors[:30]
     await state.update_data(flavors=[asdict(f) for f in flavors])
     buttons = [Btn(text=f"{f.name} · {f.vcpus}vCPU/{f.ram_mb / 1024:g}GB"
-                        + (f"/{f.disk_gb}GB" if f.disk_gb else ""), callback_data=f"buy:fl:{i}")
+                        + (f"/{f.disk_gb}GB" if f.disk_gb else "") + (f" · {f.price}" if f.price else ""),
+                   callback_data=f"buy:fl:{i}")
                for i, f in enumerate(flavors)]
     await msg.edit_text("⚙️ <b>Выберите тариф:</b>", reply_markup=kb(*grid(buttons, 1), back("buy", "❌ Отмена")))
 
@@ -239,12 +256,13 @@ async def show_flavors(msg: Message, state: FSMContext, user_id: int):
 @router.callback_query(F.data.startswith("buy:fl:"))
 async def choose_image(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    await state.update_data(flavor=data["flavors"][int(cb.data.split(":")[2])])
+    flavor = data["flavors"][int(cb.data.split(":")[2])]
+    await state.update_data(flavor=flavor)
     await cb.message.edit_text("⏳ Загружаю образы ОС…")
     await cb.answer()
     try:
         async with await _client_for(cb, state) as client:
-            images = await client.list_images(data["region"])
+            images = await client.list_images(data["region"], Flavor(**flavor))
     except Exception as e:
         return await _error(cb, e)
 
@@ -271,7 +289,8 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
         f"Провайдер: <b>{PROVIDERS[data['provider']]}</b>\n"
         f"Локация: <b>{hd.quote(data['region_label'])}</b>\n"
         f"Нужный IP: <b>{data['prefix']}.x</b>\n"
-        f"Тариф: <b>{hd.quote(f['name'])}</b> ({f['vcpus']} vCPU, {f['ram_mb']} MB)\n"
+        f"Тариф: <b>{hd.quote(f['name'])}</b> ({f['vcpus']} vCPU, {f['ram_mb']} MB"
+        f"{', ' + f['price'] if f.get('price') else ''})\n"
         f"ОС: <b>{hd.quote(image['name'])}</b>\n"
         f"Количество: <b>{data['count']}</b>\n\n"
         f"⚠️ Серверы с чужим IP будут удаляться и создаваться заново "
@@ -335,6 +354,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
     finally:
         JOBS.pop(uid, None)
 
+    await db.add_seen_ips(acc.provider, job.region, job.seen)
     for s in job.kept:
         await db.add_server(uid, acc.id, job.region, s.id, s.name, s.ipv4[0], s.admin_pass)
 

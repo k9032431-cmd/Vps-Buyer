@@ -6,7 +6,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from bot.buyer import PurchaseJob, run_purchase
-from bot.hostvds import HostVDSClient
+from bot.providers.hostvds import HostVDSClient
 
 
 def make_app(ip_sequence):
@@ -59,7 +59,7 @@ def make_app(ip_sequence):
 
 
 async def scenario():
-    import bot.hostvds as hv
+    import bot.providers.hostvds as hv
     orig_sleep = hv.asyncio.sleep
     hv.asyncio.sleep = lambda s: orig_sleep(0)  # speed up polling
     app, deleted = make_app(["123.45.0.5", "207.1.2.9", "94.103.80.11", "123.45.0.6", "94.103.80.12"])
@@ -71,7 +71,7 @@ async def scenario():
             assert c.regions() == ["eu-west2"]
             pools = await c.ip_pools("eu-west2")
             assert [p.prefix for p in pools] == ["94", "123", "207"], pools
-            from bot.hostvds import Flavor
+            from bot.providers.hostvds import Flavor
             job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "94", 2,
                               max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10)
             await run_purchase(c, job, lambda j: orig_sleep(0))

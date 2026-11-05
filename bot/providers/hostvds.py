@@ -2,59 +2,16 @@
 import asyncio
 import ipaddress
 import time
-from dataclasses import dataclass
 from datetime import datetime
 
 import aiohttp
 
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
+
 COMPUTE_MICROVERSION = "compute 2.47"
 
 
-class HostVDSError(Exception):
-    def __init__(self, message: str, status: int | None = None):
-        super().__init__(message)
-        self.status = status
-
-
-@dataclass
-class Flavor:
-    id: str
-    name: str
-    vcpus: int
-    ram_mb: int
-    disk_gb: int
-
-
-@dataclass
-class Image:
-    id: str
-    name: str
-
-
-@dataclass
-class IpPool:
-    """Group of public IPv4 subnets that share the same first octet (e.g. 94.x.x.x)."""
-    prefix: str
-    network_id: str
-    cidrs: list[str]
-
-
-@dataclass
-class RegionStatus:
-    region: str
-    available: bool
-    reason: str
-    sample_ip: str | None
-    pools: list[IpPool]
-
-
-@dataclass
-class Server:
-    id: str
-    name: str
-    status: str
-    ipv4: list[str]
-    admin_pass: str | None = None
+HostVDSError = ProviderError
 
 
 class HostVDSClient:
@@ -158,7 +115,7 @@ class HostVDSClient:
         flavors = [Flavor(f["id"], f["name"], f["vcpus"], f["ram"], f.get("disk", 0)) for f in data["flavors"]]
         return sorted(flavors, key=lambda f: (f.vcpus, f.ram_mb, f.disk_gb))
 
-    async def list_images(self, region: str) -> list[Image]:
+    async def list_images(self, region: str, flavor: Flavor | None = None) -> list[Image]:
         images, path = [], "/images"
         params = {"visibility": "public", "status": "active", "limit": 200}
         for _ in range(10):
@@ -188,7 +145,15 @@ class HostVDSClient:
             pool.cidrs.append(s["cidr"])
         return sorted(pools.values(), key=lambda p: int(p.prefix))
 
-    async def region_status(self, region: str) -> "RegionStatus":
+    async def check(self) -> str:
+        await self.authenticate()
+        return "Локации: " + (", ".join(self.regions()) or "—")
+
+    async def region_statuses(self) -> list[RegionStatus]:
+        await self._ensure_token()
+        return list(await asyncio.gather(*(self.region_status(r) for r in self.regions())))
+
+    async def region_status(self, region: str) -> RegionStatus:
         """Checks whether servers can actually be ordered in a region."""
         async def safe(coro):
             try:
