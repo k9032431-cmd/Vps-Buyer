@@ -5,9 +5,14 @@ from aiogram.types import CallbackQuery, Message
 from aiogram.utils.text_decorations import html_decoration as hd
 
 from .. import db
+from ..config import config
 from ..keyboards import back, kb, main_menu
 
 router = Router()
+
+
+def _admin(user_id: int) -> bool:
+    return user_id in config.admin_ids
 
 
 def welcome(name: str) -> str:
@@ -24,13 +29,13 @@ def welcome(name: str) -> str:
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer(welcome(message.from_user.full_name), reply_markup=main_menu())
+    await message.answer(welcome(message.from_user.full_name), reply_markup=main_menu(_admin(message.from_user.id)))
 
 
 @router.callback_query(F.data == "menu")
 async def menu(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    await cb.message.edit_text(welcome(cb.from_user.full_name), reply_markup=main_menu())
+    await cb.message.edit_text(welcome(cb.from_user.full_name), reply_markup=main_menu(_admin(cb.from_user.id)))
     await cb.answer()
 
 
@@ -43,19 +48,6 @@ async def profile(cb: CallbackQuery):
         f"Подключено аккаунтов: <b>{await db.count_accounts(uid)}</b>\n"
         f"Куплено серверов: <b>{await db.count_servers(uid)}</b>"
     )
-    await cb.message.edit_text(text, reply_markup=kb(back()))
-    await cb.answer()
-
-
-@router.callback_query(F.data == "servers")
-async def servers(cb: CallbackQuery):
-    rows = await db.list_servers(cb.from_user.id)
-    if rows:
-        lines = [f"• <code>{ip}</code> — {hd.quote(name)} ({hd.quote(region)}, {created[:16]})"
-                 for region, name, ip, created in rows]
-        text = "☁️ <b>Мои серверы</b> (последние 30)\n\n" + "\n".join(lines)
-    else:
-        text = "☁️ <b>Мои серверы</b>\n\nПока пусто. Нажмите «🛒 Купить сервер» в меню."
     await cb.message.edit_text(text, reply_markup=kb(back()))
     await cb.answer()
 

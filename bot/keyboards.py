@@ -11,11 +11,14 @@ def back(to: str = "menu", text: str = "⬅️ Назад") -> list[Btn]:
     return [Btn(text=text, callback_data=to)]
 
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu(admin: bool = False) -> InlineKeyboardMarkup:
+    info_row = [Btn(text="ℹ️ Инфо", callback_data="info")]
+    if admin:
+        info_row.append(Btn(text="🔄 Обновить бота", callback_data="update"))
     return kb(
         [Btn(text="☁️ Мои серверы", callback_data="servers")],
         [Btn(text="👤 Профиль", callback_data="profile"), Btn(text="🔑 Аккаунты", callback_data="accounts")],
-        [Btn(text="ℹ️ Инфо", callback_data="info")],
+        info_row,
         [Btn(text="🛒 Купить сервер", callback_data="buy")],
     )
 

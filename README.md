@@ -19,6 +19,13 @@
    и пробует снова. Прогресс виден в сообщении, есть кнопка «⛔ Остановить».
 7. В конце бот присылает список IP и root-пароли.
 
+**☁️ Мои серверы** — список купленных серверов. Нажмите на сервер: IP, пароль root и кнопка
+«🗑 Удалить сервер» (удаляет у провайдера, с подтверждением). Есть «🗑 Удалить все».
+
+**🔄 Обновить бота** (видна только админам из `ADMIN_IDS`) — одной кнопкой скачивает свежий код
+с GitHub (`git pull`), ставит зависимости и перезапускает бота. После перезапуска бот пришлёт,
+что изменилось.
+
 ## Подключение аккаунта HostVDS
 
 HostVDS работает на OpenStack (Keystone: `https://os-api.hostvds.com/identity`).
@@ -36,7 +43,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/k9032431-cmd/Vps-Buyer/HEAD/
 Скрипт поставит Python и зависимости в `/opt/vps-buyer`, спросит токен бота и ваш Telegram ID,
 сам сгенерирует ключ шифрования и запустит бота как службу `vps-buyer` (автозапуск после перезагрузки).
 
-- Обновить бота — запустить ту же команду ещё раз (настройки сохраняются).
+- Обновить бота — кнопка «🔄 Обновить бота» в меню или та же команда ещё раз (настройки сохраняются).
 - Удалить — та же команда с `uninstall` в конце.
 - Логи: `journalctl -u vps-buyer -f`, настройки: `/opt/vps-buyer/.env`.
 
@@ -49,7 +56,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase` и `python -m tests.test_regions`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`
 
 ## Безопасность и деньги
 

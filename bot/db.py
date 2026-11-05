@@ -120,12 +120,44 @@ async def count_accounts(user_id: int) -> int:
     return r[0]
 
 
-async def list_servers(user_id: int, limit: int = 30) -> list[tuple[str, str, str, str]]:
+@dataclass
+class ServerRow:
+    id: int
+    account_id: int
+    region: str
+    server_id: str
+    name: str
+    ip: str
+    admin_pass: str | None
+    created_at: str
+
+
+_SERVER_COLS = "id, account_id, region, server_id, name, ip, admin_pass, created_at"
+
+
+def _server(r) -> ServerRow:
+    return ServerRow(r[0], r[1], r[2], r[3], r[4], r[5], _dec(r[6]) if r[6] else None, r[7])
+
+
+async def list_servers(user_id: int, limit: int = 50) -> list[ServerRow]:
     async with aiosqlite.connect(config.db_path) as db:
-        return await (await db.execute(
-            "SELECT region, name, ip, created_at FROM servers WHERE user_id=? ORDER BY id DESC LIMIT ?",
-            (user_id, limit),
+        rows = await (await db.execute(
+            f"SELECT {_SERVER_COLS} FROM servers WHERE user_id=? ORDER BY id DESC LIMIT ?", (user_id, limit),
         )).fetchall()
+    return [_server(r) for r in rows]
+
+
+async def get_server(user_id: int, row_id: int) -> ServerRow | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        r = await (await db.execute(
+            f"SELECT {_SERVER_COLS} FROM servers WHERE id=? AND user_id=?", (row_id, user_id))).fetchone()
+    return _server(r) if r else None
+
+
+async def delete_server_row(user_id: int, row_id: int) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute("DELETE FROM servers WHERE id=? AND user_id=?", (row_id, user_id))
+        await db.commit()
 
 
 async def get_region_geo(provider: str, region: str) -> tuple[str, str] | None:
