@@ -1,9 +1,8 @@
-"""Invite-only access: admins (ADMIN_IDS) approve who may use the bot.
+"""Invite-only access: admins (ADMIN_IDS) decide who may use the bot.
 
-Everyone else sees a short presentation of the bot with two buttons: request access (admins get
-a message with ✅/❌) and a direct link to the admin (ADMIN_CONTACT)."""
+Everyone else sees a short presentation of the bot, their Telegram ID and a button that opens a chat
+with the admin (ADMIN_CONTACT). The admin grants access in "👥 Users → ➕ Add by ID"."""
 import logging
-from datetime import datetime, timedelta, timezone
 
 from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.fsm.context import FSMContext
@@ -17,9 +16,6 @@ from ..keyboards import back, kb, main_menu
 
 router = Router()
 log = logging.getLogger(__name__)
-
-REQUEST_COOLDOWN = timedelta(hours=1)
-
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.admin_ids
@@ -35,24 +31,23 @@ async def has_access(user_id: int) -> bool:
 
 
 # ---------- what people without access see ----------
-def landing_text(name: str) -> str:
+def landing_text(user: User) -> str:
     return (
-        f"👋 Привет, <b>{hd.quote(name)}</b>!\n\n"
+        f"👋 Привет, <b>{hd.quote(user.full_name)}</b>!\n\n"
         "🤖 <b>VPS Buyer</b> — бот для покупки VPS-серверов у разных провайдеров "
         "с рабочими открытыми подсетями.\n\n"
-        "☁️ <b>Провайдеры:</b> HostVDS, Selectel VDS\n"
         "🎯 <b>Нужный IP:</b> выбираете подсети — бот сам подбирает сервер с подходящим адресом\n"
         "⚡ <b>Быстро:</b> подбор IP без лишних покупок, готовый сервер сразу в чат\n"
         "🔑 <b>Сразу в работу:</b> IP, пароль root и команда SSH в одном сообщении\n"
         "🗂 <b>Управление:</b> список серверов, удаление, восстановление доступа\n\n"
         "🔒 <b>Доступ только по приглашению.</b>\n"
-        f"Нажмите «🙋 Запросить доступ» или напишите администратору @{config.admin_contact} 👇"
+        f"Для доступа напишите администратору @{config.admin_contact} и отправьте ему ваш ID:\n\n"
+        f"🆔 <code>{user.id}</code>"
     )
 
 
 def landing_kb():
-    return kb([Btn(text="🙋 Запросить доступ", callback_data="access:req")],
-              [Btn(text=f"💬 Написать админу @{config.admin_contact}", url=f"https://t.me/{config.admin_contact}")])
+    return kb([Btn(text=f"💬 Написать админу @{config.admin_contact}", url=f"https://t.me/{config.admin_contact}")])
 
 
 def _user_line(user_id: int, username: str, full_name: str) -> str:
@@ -63,57 +58,17 @@ def _user_line(user_id: int, username: str, full_name: str) -> str:
     return line + f" · <code>{user_id}</code>"
 
 
-def _age(ts: str | None) -> timedelta:
-    try:
-        return datetime.now(timezone.utc).replace(tzinfo=None) - datetime.fromisoformat(ts)
-    except Exception:
-        return timedelta.max
-
-
-async def _request(cb: CallbackQuery, bot: Bot) -> None:
-    user = cb.from_user
-    existing = await db.get_user(user.id)
-    if existing and existing.status == "pending" and _age(existing.requested_at) < REQUEST_COOLDOWN:
-        await cb.answer("⏳ Запрос уже отправлен — ждите ответа администратора.", show_alert=True)
-        return
-    if existing and existing.status == "denied" and _age(existing.decided_at) < REQUEST_COOLDOWN:
-        await cb.answer(f"😔 Запрос недавно отклонили. Попробуйте позже или напишите @{config.admin_contact}.",
-                        show_alert=True)
-        return
-    await db.request_access(user.id, user.username or "", user.full_name)
-    text = ("🙋 <b>Новый запрос доступа</b>\n\n"
-            f"👤 {_user_line(user.id, user.username or '', user.full_name)}\n"
-            f"🕒 {datetime.now().strftime('%d.%m.%Y %H:%M')}")
-    markup = kb([Btn(text="✅ Разрешить", callback_data=f"usr:ok:{user.id}"),
-                 Btn(text="❌ Отклонить", callback_data=f"usr:no:{user.id}")])
-    sent = 0
-    for admin_id in config.admin_ids:
-        try:
-            await bot.send_message(admin_id, text, reply_markup=markup)
-            sent += 1
-        except Exception:
-            log.exception("can't notify admin %s", admin_id)
-    await cb.answer()
-    await cb.message.edit_text(
-        "✅ <b>Запрос отправлен!</b>\n\n"
-        "Администратор рассмотрит его, и бот сразу пришлёт уведомление.\n\n"
-        f"💬 Ускорить можно, написав @{config.admin_contact}" if sent else
-        f"⚠️ Не удалось связаться с администратором. Напишите напрямую: @{config.admin_contact}",
-        reply_markup=kb([Btn(text=f"💬 Написать админу @{config.admin_contact}",
-                             url=f"https://t.me/{config.admin_contact}")]))
-
-
 async def _show_landing(event: Update, user: User) -> None:
     if event.callback_query:
         cq = event.callback_query
         await cq.answer("🔒 Нет доступа", show_alert=False)
         if cq.message:
             try:
-                await cq.message.edit_text(landing_text(user.full_name), reply_markup=landing_kb())
+                await cq.message.edit_text(landing_text(user), reply_markup=landing_kb())
             except Exception:
-                await cq.message.answer(landing_text(user.full_name), reply_markup=landing_kb())
+                await cq.message.answer(landing_text(user), reply_markup=landing_kb())
     elif event.message:
-        await event.message.answer(landing_text(user.full_name), reply_markup=landing_kb())
+        await event.message.answer(landing_text(user), reply_markup=landing_kb())
 
 
 class AccessMiddleware(BaseMiddleware):
@@ -126,10 +81,7 @@ class AccessMiddleware(BaseMiddleware):
         if await has_access(user.id):
             return await handler(event, data)
         try:
-            if event.callback_query and event.callback_query.data == "access:req":
-                await _request(event.callback_query, data["bot"])
-            else:
-                await _show_landing(event, user)
+            await _show_landing(event, user)
         except Exception:
             log.exception("access gate failed")
         return None
@@ -187,6 +139,7 @@ async def users_screen(user_id: int):
         rows.append([Btn(text=f"🚫 Забрать доступ · {u.full_name[:20] or u.user_id}",
                          callback_data=f"usr:rm:{u.user_id}")])
     text += f"\n\n🛡 Админы (из ADMIN_IDS): {', '.join(f'<code>{a}</code>' for a in sorted(config.admin_ids))}"
+    text += "\n\n💡 Человек без доступа видит в боте свой ID — попросите его прислать и нажмите «➕ Добавить по ID»."
     rows.append([Btn(text="➕ Добавить по ID", callback_data="usr:add")])
     rows.append(back("menu", "🏠 Главное меню"))
     return text[:4000], kb(*rows)

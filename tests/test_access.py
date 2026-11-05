@@ -57,37 +57,29 @@ async def scenario():
     dp.update.outer_middleware(access.AccessMiddleware())
     dp.include_routers(access.router, menu.router, accounts.router, servers.router, buy.router, update.router)
 
-    # 1) a stranger sees the presentation, not the menu
+    # 1) a stranger sees the presentation with their ID, not the menu
     await dp.feed_update(bot, msg(GUEST, "/start"))
     landing = s.texts()[-1]
     print(landing, "\n")
     assert "бот для покупки VPS-серверов у разных провайдеров" in landing and "@oldarsi" in landing
+    assert "<code>2002</code>" in landing, "the guest's ID is shown so they can send it to the admin"
+    assert "HostVDS" not in landing and "Selectel" not in landing, "providers are not listed"
     buttons = last_markup(s)
-    assert buttons[0].callback_data == "access:req" and buttons[1].url == "https://t.me/oldarsi"
+    assert len(buttons) == 1 and buttons[0].url == "https://t.me/oldarsi", "only the 'write to admin' button"
     # any button / command is gated
     await dp.feed_update(bot, cb(GUEST, "buy"))
     assert isinstance(s.calls[-1], EditMessageText) and "Доступ только по приглашению" in s.calls[-1].text
     await dp.feed_update(bot, cb(GUEST, "servers"))
     assert not any("Мои серверы" in t for t in s.texts())
+    await dp.feed_update(bot, cb(GUEST, "access:req"))  # old button from a previous version does nothing
+    assert not sent_to(s, ADMIN)
 
-    # 2) request access → every admin gets ✅/❌
-    await dp.feed_update(bot, cb(GUEST, "access:req"))
-    to_admin = sent_to(s, ADMIN)
-    assert len(to_admin) == 1 and "Новый запрос доступа" in to_admin[0].text and "@u2002" in to_admin[0].text
-    assert [b.callback_data for b in to_admin[0].reply_markup.inline_keyboard[0]] == ["usr:ok:2002", "usr:no:2002"]
-    assert "Запрос отправлен" in s.texts()[-1]
-    # second request right away → just an alert, admins are not spammed
-    await dp.feed_update(bot, cb(GUEST, "access:req"))
-    assert isinstance(s.calls[-1], AnswerCallbackQuery) and "уже отправлен" in s.calls[-1].text
-    assert len(sent_to(s, ADMIN)) == 1
-
-    # admin menu shows the pending request
-    await dp.feed_update(bot, msg(ADMIN, "/start"))
-    assert "👥 Пользователи · 🙋 1" in [b.text for b in last_markup(s)]
-
-    # 3) admin approves → guest is notified and gets the real menu
-    await dp.feed_update(bot, cb(ADMIN, "usr:ok:2002"))
-    assert "Доступ выдан" in s.texts()[-2] or "Доступ выдан" in s.texts()[-1]
+    # 2) admin grants access by ID → guest is notified and gets the real menu
+    await dp.feed_update(bot, cb(ADMIN, "users"))
+    assert "➕ Добавить по ID" in [b.text for b in last_markup(s)]
+    await dp.feed_update(bot, cb(ADMIN, "usr:add"))
+    await dp.feed_update(bot, msg(ADMIN, "2002"))
+    assert "Доступ для <code>2002</code> выдан" in s.texts()[-1]
     assert "Доступ открыт" in sent_to(s, GUEST)[-1].text
     assert await access.has_access(GUEST)
     await dp.feed_update(bot, msg(GUEST, "/start"))
@@ -95,8 +87,10 @@ async def scenario():
     assert "👥 Пользователи" not in " ".join(b.text for b in last_markup(s)), "no admin buttons for users"
     await dp.feed_update(bot, cb(GUEST, "users"))
     assert isinstance(s.calls[-1], AnswerCallbackQuery) and "Только для админов" in s.calls[-1].text
+    await dp.feed_update(bot, msg(GUEST, "/start"))
+    assert "🛒 Купить сервер" in [b.text for b in last_markup(s)]
 
-    # 4) admin list + revoke
+    # 3) admin list + revoke
     await dp.feed_update(bot, cb(ADMIN, "users"))
     assert "С доступом: 1" in s.texts()[-1]
     await dp.feed_update(bot, cb(ADMIN, "usr:rm:2002"))
@@ -105,18 +99,10 @@ async def scenario():
     await dp.feed_update(bot, msg(GUEST, "/start"))
     assert "Доступ только по приглашению" in s.texts()[-1]
 
-    # 5) grant by ID
+    # 4) bad ID input
     await dp.feed_update(bot, cb(ADMIN, "usr:add"))
-    await dp.feed_update(bot, msg(ADMIN, "3003"))
-    assert await access.has_access(3003) and "Доступ для <code>3003</code> выдан" in s.texts()[-1]
-
-    # 6) deny path
-    await dp.feed_update(bot, msg(4004, "/start"))
-    await dp.feed_update(bot, cb(4004, "access:req"))
-    await dp.feed_update(bot, cb(ADMIN, "usr:no:4004"))
-    assert "В доступе отказано" in sent_to(s, 4004)[-1].text and not await access.has_access(4004)
-    await dp.feed_update(bot, cb(4004, "access:req"))  # within the cooldown
-    assert isinstance(s.calls[-1], AnswerCallbackQuery) and "отклонили" in s.calls[-1].text
+    await dp.feed_update(bot, msg(ADMIN, "abc"))
+    assert "Нужен числовой ID" in s.texts()[-1]
 
 
 def test_access():
