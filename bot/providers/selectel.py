@@ -132,7 +132,8 @@ class SelectelVDSClient:
         return Server(str(data["ctid"]), data.get("name", ""), data.get("status", ""), [ip] if ip else [])
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
-                            network_id: str | None, boot_volume_gb: int, port_id: str | None = None) -> Server:
+                            network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
+                            metadata: dict | None = None) -> Server:
         password = _password()
         async with self._create_lock:  # respect 12 creates per minute
             wait = self._last_create + CREATE_INTERVAL - time.time()

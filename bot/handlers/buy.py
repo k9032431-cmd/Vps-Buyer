@@ -15,6 +15,7 @@ from ..config import config
 from .. import os_names
 from ..providers import Flavor, IpPool, ProviderError
 from ..providers.base import prefix24
+from ..providers.hostvds_public import money
 from ..keyboards import PROVIDERS, back, grid, kb
 from .accounts import accounts_view, make_client
 
@@ -144,7 +145,9 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
         log.warning("ip_pools failed: %s", e)
         pools = []
     pools = _merge_seen(pools, await db.seen_ips(data["provider"], region))
-    await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[])
+    full = [p for p in pools if p.free == 0]          # provider says: no free addresses there
+    pools = [p for p in pools if p.free != 0]
+    await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full))
     await render_ip_screen(cb.message, state, edit=True)
 
 
@@ -155,6 +158,7 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     text = f"🌐 <b>Доступные IP в {hd.quote(data['region_label'])}</b> ({len(pools)})\n\n"
     if pools:
         text += "\n".join(f"{'✅' if i in selected else '▫️'} <code>{p['prefix']}.#</code>"
+                          + (f" · свободно {p['free']}" if p.get("free") else "")
                           for i, p in enumerate(pools[:150]))
         if len(pools) > 150:
             text += f"\n… и ещё {len(pools) - 150}"
@@ -163,6 +167,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     else:
         text += ("Список подсетей пока неизвестен — бот запоминает IP, которые выдаёт провайдер, "
                  "и после первой покупки покажет их здесь. Сейчас добавьте IP вручную.")
+    if data.get("full_blocks"):
+        text += f"\n\n<i>Скрыто блоков без свободных IP: {data['full_blocks']}</i>"
     if custom:
         text += "\n\n✏️ Добавлено вручную: " + ", ".join(f"<code>{show_prefix(c)}</code>" for c in custom)
     total = len(selected) + len(custom)
@@ -355,14 +361,56 @@ async def show_flavors(msg: Message, state: FSMContext, user_id: int):
     await msg.edit_text("⚙️ <b>Выберите тариф:</b>", reply_markup=kb(*grid(buttons, 1), back("buy", "❌ Отмена")))
 
 
-# ---------- 7. image ----------
+# ---------- 6b. network plan (HostVDS) ----------
 @router.callback_query(F.data.startswith("buy:fl:"))
-async def choose_image(cb: CallbackQuery, state: FSMContext):
+async def flavor_selected(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     flavor = data["flavors"][int(cb.data.split(":")[2])]
-    await state.update_data(flavor=flavor)
-    await cb.message.edit_text("⏳ Загружаю образы ОС…")
+    await state.update_data(flavor=flavor, network_plan=None)
     await cb.answer()
+    if len(flavor.get("network_plans") or []) > 1:
+        await show_network_plans(cb.message, flavor, show_all=False)
+    else:
+        await choose_image(cb, state)
+
+
+def _plan_label(p: dict, currency: str, default: str) -> str:
+    price = "бесплатно" if not p["price"] else f"{money(p['price'], currency)}/мес"
+    return f"{'⭐ ' if p['name'] == default else ''}{p['title']} · {price}"
+
+
+async def show_network_plans(msg: Message, flavor: dict, show_all: bool):
+    plans = flavor["network_plans"]
+    shown = [(i, p) for i, p in enumerate(plans) if show_all or p["visible"]]
+    rows = [[Btn(text=_plan_label(p, flavor.get("currency", "usd"), flavor.get("default_network_plan")),
+                 callback_data=f"buy:np:{i}")] for i, p in shown]
+    if not show_all and len(shown) < len(plans):
+        rows.append([Btn(text=f"🔽 Все планы ({len(plans)})", callback_data="buy:npall")])
+    text = (f"🌐 <b>Network plan</b> для тарифа <b>{hd.quote(flavor['name'])}</b>\n\n"
+            "⭐ — план тарифа по умолчанию (трафик ограничен).\n"
+            "Unlimited — безлимитный трафик: Shared — общий канал, Dedicated — выделенный.")
+    await msg.edit_text(text, reply_markup=kb(*rows, back("buy", "❌ Отмена")))
+
+
+@router.callback_query(F.data == "buy:npall")
+async def network_plans_all(cb: CallbackQuery, state: FSMContext):
+    await show_network_plans(cb.message, (await state.get_data())["flavor"], show_all=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("buy:np:"))
+async def network_plan_selected(cb: CallbackQuery, state: FSMContext):
+    flavor = (await state.get_data())["flavor"]
+    await state.update_data(network_plan=flavor["network_plans"][int(cb.data.split(":")[2])])
+    await cb.answer()
+    await choose_image(cb, state)
+
+
+# ---------- 7. image ----------
+async def choose_image(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    flavor = data["flavor"]
+    await cb.message.edit_text("⏳ Загружаю образы ОС…")
     try:
         async with await _client_for(cb, state) as client:
             images = await client.list_images(data["region"], Flavor(**flavor))
@@ -370,7 +418,7 @@ async def choose_image(cb: CallbackQuery, state: FSMContext):
         return await _error(cb, e)
 
     choices, other = os_names.simplify(images)
-    await state.update_data(images=[{"id": c.id, "name": c.title} for c in choices],
+    await state.update_data(images=[{"id": c.id, "name": c.title, "distro": c.distro} for c in choices],
                             other_images=[asdict(i) for i in other[:40]])
     await _show_os(cb.message, choices, bool(other))
 
@@ -396,7 +444,7 @@ async def other_images(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data == "buy:imgback")
 async def images_back(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    choices = [os_names.OsChoice(i["id"], i["name"], i["name"]) for i in data["images"]]
+    choices = [os_names.OsChoice(i["id"], i["name"], i["name"], i.get("distro", "")) for i in data["images"]]
     await _show_os(cb.message, choices, bool(data.get("other_images")))
     await cb.answer()
 
@@ -416,7 +464,10 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
         f"Нужные IP: {prefixes_text(data['prefixes'])}\n"
         f"Тариф: <b>{hd.quote(f['name'])}</b> ({f['vcpus']} vCPU, {f['ram_mb']} MB"
         f"{', ' + f['price'] if f.get('price') else ''})\n"
-        f"ОС: <b>{hd.quote(image['name'])}</b>\n"
+        + (f"Network plan: <b>{hd.quote(data['network_plan']['title'])}</b>"
+           f"{' · ' + money(data['network_plan']['price'], f.get('currency', 'usd')) + '/мес' if data['network_plan']['price'] else ''}\n"
+           if data.get("network_plan") else "")
+        + f"ОС: <b>{hd.quote(image['name'])}</b>\n"
         f"Количество: <b>{data['count']}</b>\n\n"
         + ("⚡ Быстрый режим: IP подбирается бесплатно через сетевые порты, сервер покупается "
            "только на подходящий IP.\n" if data.get("network_id") and data["provider"] == "hostvds" else "")
@@ -453,6 +504,9 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
         region=data["region"], flavor=Flavor(**data["flavor"]), image_id=data["image"]["id"],
         network_id=data.get("network_id"), prefixes=data["prefixes"], count=data["count"],
         targets=[tuple(t) for t in data.get("targets", [])], max_port_attempts=config.max_port_attempts,
+        metadata={"network_plan": (data.get("network_plan") or {}).get("name"),
+                  "os_distro": data["image"].get("distro"), "kind": data["flavor"].get("kind")}
+        if data["provider"] == "hostvds" else {},
         port_parallel=config.port_parallel,
         max_attempts=config.max_attempts, parallel=config.parallel,
         active_timeout=config.active_timeout, boot_volume_gb=config.boot_volume_gb,

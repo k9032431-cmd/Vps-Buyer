@@ -37,6 +37,7 @@ class PurchaseJob:
     boot_volume_gb: int
     targets: list[tuple[str | None, str | None]] = field(default_factory=list)  # (network, subnet) per prefix
     on_found: Callable[[Server], Awaitable[None]] | None = None   # called as soon as a server is ready
+    metadata: dict = field(default_factory=dict)                  # server metadata (HostVDS network plan…)
     max_port_attempts: int = 500
     port_parallel: int = 10
     kept: list[Server] = field(default_factory=list)
@@ -137,7 +138,7 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
     job.attempts += 1
     try:
         srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id,
-                                         job.boot_volume_gb, port_id=port_id)
+                                         job.boot_volume_gb, port_id=port_id, metadata=job.metadata)
     except BaseException:
         await client.delete_port(job.region, port_id)
         raise
@@ -156,7 +157,8 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
 # ---------------- fallback mode: servers ----------------
 async def _try_server(client, job: PurchaseJob) -> None:
     name = f"vps-{secrets.token_hex(3)}"
-    srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id, job.boot_volume_gb)
+    srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id, job.boot_volume_gb,
+                                     metadata=job.metadata)
     try:
         state = await client.wait_ip(job.region, srv.id, job.active_timeout)
         job.seen += state.ipv4

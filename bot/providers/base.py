@@ -28,6 +28,10 @@ class Flavor:
     ram_mb: int
     disk_gb: int
     price: str = ""
+    kind: str = ""
+    network_plans: list[dict] = field(default_factory=list)   # HostVDS: [{name, title, price, …}]
+    default_network_plan: str = ""
+    currency: str = "usd"
 
 
 @dataclass
@@ -43,6 +47,7 @@ class IpPool:
     network_id: str | None
     cidrs: list[str]                 # source subnets (or example IPs when learned from servers)
     subnet_id: str | None = None     # allocate straight from this subnet when the provider allows it
+    free: int | None = None          # free IPv4 addresses in its network, when the provider tells us
 
 
 def prefix24(ip: str) -> str:

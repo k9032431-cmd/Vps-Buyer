@@ -1,5 +1,10 @@
 """End-to-end test of the purchase loop against a fake OpenStack API."""
 import asyncio
+
+from bot.config import config
+
+# keep tests offline: the HostVDS site API is unreachable → OpenStack fallback is used
+object.__setattr__(config, "hostvds_public_api", "http://127.0.0.1:9")
 import itertools
 
 from aiohttp import web

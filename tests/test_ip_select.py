@@ -10,6 +10,9 @@ from aiohttp.test_utils import TestServer
 
 from bot import db
 from bot.config import config
+
+# keep tests offline: the HostVDS site API is unreachable → OpenStack fallback is used
+object.__setattr__(config, "hostvds_public_api", "http://127.0.0.1:9")
 from bot.handlers import accounts, buy, menu, servers, update
 from tests.test_servers_update import UID, FakeSession, cb_update
 

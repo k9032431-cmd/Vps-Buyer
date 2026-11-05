@@ -32,6 +32,7 @@ class OsChoice:
     id: str        # image id
     title: str     # "🟠 Ubuntu 22.04"
     raw: str       # original image name
+    distro: str = ""   # "ubuntu", "debian"… (HostVDS panel sends it as server metadata os_distro)
 
 
 def _version(name: str, family_key: str) -> str:
@@ -64,7 +65,7 @@ def simplify(images: list[Image]) -> tuple[list[OsChoice], list[Image]]:
         slot = (key, ver)
         # several builds of the same version → keep the newest-looking one (latest name sorts last)
         if slot not in best or img.name > best[slot].raw:
-            best[slot] = OsChoice(img.id, label, img.name)
+            best[slot] = OsChoice(img.id, label, img.name, key)
     order = {f[0]: i for i, f in enumerate(FAMILIES)}
     choices = sorted(best.items(), key=lambda kv: (order[kv[0][0]], tuple(-x for x in _vkey(kv[0][1]))))
     return [c for _, c in choices], sorted(other, key=lambda i: i.name.lower())

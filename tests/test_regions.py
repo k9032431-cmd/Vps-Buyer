@@ -7,6 +7,9 @@ from aiohttp.test_utils import TestServer
 
 from bot import db, geo
 from bot.config import config
+
+# keep tests offline: the HostVDS site API is unreachable → OpenStack fallback is used
+object.__setattr__(config, "hostvds_public_api", "http://127.0.0.1:9")
 from bot.providers.hostvds import HostVDSClient
 
 FLAVORS = {"eu-west1": [{"id": "1", "name": "s", "vcpus": 1, "ram": 1024, "disk": 10}], "eu-north1": [],

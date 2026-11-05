@@ -6,6 +6,7 @@ from datetime import datetime
 
 import aiohttp
 
+from . import hostvds_public as public
 from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24
 
 COMPUTE_MICROVERSION = "compute 2.47"
@@ -111,6 +112,23 @@ class HostVDSClient:
 
     # ---------- resources ----------
     async def list_flavors(self, region: str) -> list[Flavor]:
+        """Tariffs as sold on hostvds.com (prices, stock, network plans); raw Nova flavors as a fallback."""
+        try:
+            plans = await public.plans(region)
+        except Exception:
+            plans = None
+        if plans:
+            flavors = []
+            for p in plans:
+                if p.get("is_out_of_stock") or p.get("force_out_of_stock") or not p.get("flavor_uuid"):
+                    continue
+                cur = p.get("currency") or "usd"
+                nets, default = public.network_plans(p)
+                flavors.append(Flavor(p["flavor_uuid"], p["name"], p["vcpus"], p["ram"], round(p["disk"] / 1024),
+                                      f"{public.money(round(float(p.get('monthly') or 0), 2), cur)}/мес",
+                                      p.get("kind", ""), nets, default, cur))
+            if flavors:
+                return sorted(flavors, key=lambda f: (f.kind != "standard", f.vcpus, f.ram_mb, f.disk_gb))
         data = await self._request("GET", "compute", region, "/flavors/detail")
         flavors = [Flavor(f["id"], f["name"], f["vcpus"], f["ram"], f.get("disk", 0)) for f in data["flavors"]]
         return sorted(flavors, key=lambda f: (f.vcpus, f.ram_mb, f.disk_gb))
@@ -133,6 +151,11 @@ class HostVDSClient:
         nets = (await self._request("GET", "network", region, "/networks"))["networks"]
         subnets = (await self._request("GET", "network", region, "/subnets"))["subnets"]
         usable = {n["id"] for n in nets if n.get("router:external") or n.get("shared")} or {n["id"] for n in nets}
+        try:  # free IPv4 per network from the public site API
+            info = (await public.regions()).get(region) or {}
+            free = {n["network_id"]: n.get("available_ips_v4") for n in info.get("networks") or []}
+        except Exception:
+            free = {}
         pools: dict[str, IpPool] = {}
         for s in subnets:
             if s.get("ip_version") != 4 or s["network_id"] not in usable:
@@ -140,7 +163,8 @@ class HostVDSClient:
             if ipaddress.ip_network(s["cidr"], strict=False).is_private:
                 continue
             for prefix in blocks24(s["cidr"], s.get("allocation_pools")):
-                pools.setdefault(prefix, IpPool(prefix, s["network_id"], [s["cidr"]], s.get("id")))
+                pools.setdefault(prefix, IpPool(prefix, s["network_id"], [s["cidr"]], s.get("id"),
+                                                free.get(s["network_id"])))
         return sorted(pools.values(), key=lambda p: tuple(int(x) for x in p.prefix.split(".")))
 
     # ---------- ports: free & fast way to pick an IP before buying a server ----------
@@ -167,7 +191,30 @@ class HostVDSClient:
 
     async def region_statuses(self) -> list[RegionStatus]:
         await self._ensure_token()
-        return list(await asyncio.gather(*(self.region_status(r) for r in self.regions())))
+        try:
+            pub = await public.regions()
+        except Exception:
+            pub = {}
+        if not pub:  # site API unreachable → probe every region through OpenStack
+            return list(await asyncio.gather(*(self.region_status(r) for r in self.regions())))
+        result = []
+        for region in self.regions():
+            info = pub.get(region)
+            if not info:
+                result.append(RegionStatus(region, False, "нет на сайте HostVDS", None))
+                continue
+            ok, reason = True, ""
+            if info.get("is_maintenance"):
+                ok, reason = False, "техработы"
+            elif not info.get("is_available") or info.get("is_read_only"):
+                ok, reason = False, "создание серверов закрыто"
+            elif info.get("is_out_of_stock"):
+                ok, reason = False, "нет в наличии"
+            elif not info.get("available_ips_v4"):
+                ok, reason = False, "нет свободных IPv4"
+            result.append(RegionStatus(region, ok, reason, None, [], (info.get("country_code") or "").upper(),
+                                       public.city_name(info.get("city_code", ""))))
+        return result
 
     async def region_status(self, region: str) -> RegionStatus:
         """Checks whether servers can actually be ordered in a region."""
@@ -207,12 +254,15 @@ class HostVDSClient:
         return st
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
-                            network_id: str | None, boot_volume_gb: int, port_id: str | None = None) -> Server:
+                            network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
+                            metadata: dict | None = None) -> Server:
         if port_id:
             networks = [{"port": port_id}]
         else:
             networks = [{"uuid": network_id}] if network_id else "auto"
         server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks}
+        if metadata:  # e.g. {"network_plan": "unlim-shared-1000"} — how HostVDS picks the network plan
+            server["metadata"] = {k: str(v) for k, v in metadata.items() if v}
         if flavor.disk_gb:
             server["imageRef"] = image_id
         else:  # flavor without local disk → boot from volume
