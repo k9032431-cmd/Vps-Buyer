@@ -34,7 +34,9 @@ async def servers(cb: CallbackQuery):
         return await cb.answer()
     buttons = [[Btn(text=f"🖥 {r.ip} · {r.region}", callback_data=f"srv:{r.id}")] for r in rows]
     buttons.append([Btn(text="🗑 Удалить все", callback_data="srv:delall")])
-    await cb.message.edit_text(f"☁️ <b>Мои серверы</b> ({len(rows)})\n\nНажмите на сервер, чтобы посмотреть или удалить:",
+    ips = "\n".join(f"<code>{r.ip}</code> · {hd.quote(r.region)}" for r in rows)
+    await cb.message.edit_text(f"☁️ <b>Мои серверы</b> ({len(rows)})\n\n{ips}\n\n"
+                               "Нажмите на IP, чтобы скопировать. Кнопка ниже — посмотреть или удалить:",
                                reply_markup=kb(*buttons, back()))
     await cb.answer()
 

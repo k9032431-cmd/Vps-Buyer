@@ -6,7 +6,7 @@ import time
 
 import aiohttp
 
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, prefix24
 
 API_URL = "https://api.vscale.io/v1"
 # The API allows 12 server-create requests per minute.
@@ -93,9 +93,9 @@ class SelectelVDSClient:
         for s in scalets:
             ip = (s.get("public_address") or {}).get("address")
             if s.get("location") == region and ip:
-                pool = pools.setdefault(ip.split(".")[0], IpPool(ip.split(".")[0], None, []))
+                pool = pools.setdefault(prefix24(ip), IpPool(prefix24(ip), None, []))
                 pool.cidrs.append(ip)
-        return sorted(pools.values(), key=lambda p: int(p.prefix))
+        return sorted(pools.values(), key=lambda p: tuple(int(x) for x in p.prefix.split(".")))
 
     async def ip_pools(self, region: str) -> list[IpPool]:
         return self._pools_from(await self._scalets(), region)
@@ -132,7 +132,7 @@ class SelectelVDSClient:
         return Server(str(data["ctid"]), data.get("name", ""), data.get("status", ""), [ip] if ip else [])
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
-                            network_id: str | None, boot_volume_gb: int) -> Server:
+                            network_id: str | None, boot_volume_gb: int, port_id: str | None = None) -> Server:
         password = _password()
         async with self._create_lock:  # respect 12 creates per minute
             wait = self._last_create + CREATE_INTERVAL - time.time()
@@ -157,12 +157,18 @@ class SelectelVDSClient:
             if e.status != 404:
                 raise
 
+    async def wait_ip(self, region: str, server_id: str, timeout: int) -> Server:
+        return await self._wait(server_id, timeout, need_active=False)
+
     async def wait_active(self, region: str, server_id: str, timeout: int) -> Server:
+        return await self._wait(server_id, timeout, need_active=True)
+
+    async def _wait(self, server_id: str, timeout: int, need_active: bool) -> Server:
         deadline = time.time() + timeout
         while True:
-            s = await self.get_server(region, server_id)
-            if s.status == "started" and s.ipv4:
-                s.status = "ACTIVE"
+            s = await self.get_server("", server_id)
+            if s.ipv4 and (s.status == "started" or not need_active):
+                s.status = "ACTIVE" if s.status == "started" else s.status
                 return s
             if s.status in ("deleted", "billing"):
                 s.status = "ERROR"
@@ -170,4 +176,4 @@ class SelectelVDSClient:
             if time.time() > deadline:
                 s.status = "TIMEOUT"
                 return s
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)

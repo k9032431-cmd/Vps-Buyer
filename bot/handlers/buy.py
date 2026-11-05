@@ -12,7 +12,9 @@ from aiogram.utils.text_decorations import html_decoration as hd
 from .. import db, geo
 from ..buyer import PurchaseJob, run_purchase
 from ..config import config
+from .. import os_names
 from ..providers import Flavor, IpPool, ProviderError
+from ..providers.base import prefix24
 from ..keyboards import PROVIDERS, back, grid, kb
 from .accounts import accounts_view, make_client
 
@@ -22,7 +24,7 @@ log = logging.getLogger(__name__)
 # user_id -> running job
 JOBS: dict[int, PurchaseJob] = {}
 
-POPULAR_OS = ("ubuntu", "debian", "centos", "alma", "rocky", "windows")
+MAX_IP_BUTTONS = 60
 
 
 class Buy(StatesGroup):
@@ -143,51 +145,67 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
         pools = []
     pools = _merge_seen(pools, await db.seen_ips(data["provider"], region))
     await state.update_data(pools=[asdict(p) for p in pools])
-    lines = [f"• <b>{p.prefix}.x.x.x</b> — {', '.join(p.cidrs[:4])}{' …' if len(p.cidrs) > 4 else ''}"
-             for p in pools]
-    text = f"🌐 <b>IP-подсети в {hd.quote(label)}</b>\n\n"
-    text += "\n".join(lines) if lines else (
-        "Список подсетей пока неизвестен — бот запоминает IP, которые выдаёт провайдер, "
-        "и после первой покупки покажет их здесь. Сейчас укажите префикс вручную.")
+    shown = pools[:MAX_IP_BUTTONS]
+    text = f"🌐 <b>Доступные IP в {hd.quote(label)}</b> ({len(pools)})\n\n"
+    if pools:
+        text += "\n".join(f"<code>{p.prefix}.#</code>" for p in pools[:150])
+        if len(pools) > 150:
+            text += f"\n… и ещё {len(pools) - 150}"
+        if len(pools) > len(shown):
+            text += f"\n\nКнопками показаны первые {len(shown)} — остальные введите через «✏️ Свой IP»."
+    else:
+        text += ("Список подсетей пока неизвестен — бот запоминает IP, которые выдаёт провайдер, "
+                 "и после первой покупки покажет их здесь. Сейчас введите IP вручную.")
     text += "\n\nВыберите, какой IP нужен:"
-    buttons = [Btn(text=f"{p.prefix}.x.x.x", callback_data=f"buy:ip:{i}") for i, p in enumerate(pools)]
-    rows = grid(buttons, 3) + [[Btn(text="✏️ Свой префикс (напр. 94.103)", callback_data="buy:ip:custom")],
+    buttons = [Btn(text=f"{p.prefix}.#", callback_data=f"buy:ip:{i}") for i, p in enumerate(shown)]
+    rows = grid(buttons, 2) + [[Btn(text="✏️ Свой IP (напр. 95.182.87)", callback_data="buy:ip:custom")],
                                back(f"buy:acc:{data['account_id']}")]
-    await cb.message.edit_text(text, reply_markup=kb(*rows))
+    await cb.message.edit_text(text[:4000], reply_markup=kb(*rows))
 
 
 def _merge_seen(pools: list[IpPool], seen: list[str]) -> list[IpPool]:
-    """Adds prefixes of IPs the provider gave out before (for providers without a subnet API)."""
+    """Adds /24 blocks of IPs the provider gave out before (for providers without a subnet API)."""
     known = {p.prefix: p for p in pools}
     for ip in seen:
-        prefix = ip.split(".")[0]
+        prefix = prefix24(ip)
         if prefix not in known:
             known[prefix] = IpPool(prefix, None, [])
         pool = known[prefix]
         if pool.network_id is None and len(pool.cidrs) < 5 and ip not in pool.cidrs:
             pool.cidrs.append(ip)
-    return sorted(known.values(), key=lambda p: int(p.prefix))
+    return sorted(known.values(), key=lambda p: tuple(int(x) for x in p.prefix.split(".")))
+
+
+def show_prefix(prefix: str) -> str:
+    """"95.182.87" → "95.182.87.#", "94" → "94.#.#.#"."""
+    parts = prefix.split(".")
+    return ".".join(parts + ["#"] * (4 - len(parts))) if len(parts) < 4 else prefix
 
 
 @router.callback_query(F.data == "buy:ip:custom")
 async def custom_prefix(cb: CallbackQuery, state: FSMContext):
     await state.set_state(Buy.custom_prefix)
-    await cb.message.edit_text("✏️ Отправьте начало IP, например <code>94</code> или <code>94.103</code>:",
+    await cb.message.edit_text("✏️ Отправьте начало IP, например <code>95.182.87</code>, "
+                               "<code>94.103</code> или <code>94</code>:",
                                reply_markup=kb(back("buy", "❌ Отмена")))
     await cb.answer()
 
 
 @router.message(Buy.custom_prefix)
 async def custom_prefix_set(message: Message, state: FSMContext):
-    prefix = message.text.strip().rstrip(".")
+    prefix = message.text.strip().rstrip(".#").rstrip(".")
     parts = prefix.split(".")
     if not (1 <= len(parts) <= 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts)):
-        await message.answer("Неверный формат. Пример: <code>94</code> или <code>94.103</code>")
+        await message.answer("Неверный формат. Пример: <code>95.182.87</code> или <code>94</code>")
         return
     data = await state.get_data()
     # Use the pool network if the prefix belongs to a known pool, otherwise let the cloud pick.
-    pool = next((p for p in data.get("pools", []) if p["prefix"] == parts[0]), None)
-    await state.update_data(prefix=prefix, network_id=pool["network_id"] if pool else None)
+    pools = data.get("pools", [])
+    exact = next((p for p in pools if p["prefix"] == prefix), None)
+    any_net = next((p for p in pools if p["network_id"] and (p["prefix"] + ".").startswith(prefix + ".")), None)
+    pool = exact or any_net
+    await state.update_data(prefix=prefix, network_id=pool["network_id"] if pool else None,
+                            subnet_id=exact["subnet_id"] if exact else None)
     await ask_count(message, state)
 
 
@@ -195,7 +213,7 @@ async def custom_prefix_set(message: Message, state: FSMContext):
 async def ip_selected(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     pool = data["pools"][int(cb.data.split(":")[2])]
-    await state.update_data(prefix=pool["prefix"], network_id=pool["network_id"])
+    await state.update_data(prefix=pool["prefix"], network_id=pool["network_id"], subnet_id=pool.get("subnet_id"))
     await cb.answer()
     await ask_count(cb.message, state, edit=True)
 
@@ -204,7 +222,7 @@ async def ip_selected(cb: CallbackQuery, state: FSMContext):
 async def ask_count(message: Message, state: FSMContext, edit: bool = False):
     await state.set_state(Buy.count)
     data = await state.get_data()
-    text = (f"🔢 Нужен IP <b>{data['prefix']}.x</b>\n\nСколько серверов купить? "
+    text = (f"🔢 Нужен IP <code>{show_prefix(data['prefix'])}</code>\n\nСколько серверов купить? "
             "Выберите или отправьте число:")
     buttons = [Btn(text=str(n), callback_data=f"buy:cnt:{n}") for n in (1, 2, 3, 5, 10)]
     markup = kb(buttons, back("buy", "❌ Отмена"))
@@ -266,35 +284,59 @@ async def choose_image(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         return await _error(cb, e)
 
-    def rank(img):
-        name = img.name.lower()
-        idx = next((i for i, os_ in enumerate(POPULAR_OS) if os_ in name), len(POPULAR_OS))
-        return idx, name
+    choices, other = os_names.simplify(images)
+    await state.update_data(images=[{"id": c.id, "name": c.title} for c in choices],
+                            other_images=[asdict(i) for i in other[:40]])
+    await _show_os(cb.message, choices, bool(other))
 
-    images = sorted(images, key=rank)[:24]
-    await state.update_data(images=[asdict(i) for i in images])
-    buttons = [Btn(text=i.name[:40], callback_data=f"buy:img:{n}") for n, i in enumerate(images)]
-    await cb.message.edit_text("💿 <b>Выберите ОС:</b>", reply_markup=kb(*grid(buttons), back("buy", "❌ Отмена")))
+
+async def _show_os(msg: Message, choices, has_other: bool):
+    buttons = [Btn(text=c.title, callback_data=f"buy:img:{n}") for n, c in enumerate(choices[:40])]
+    rows = grid(buttons, 2)
+    if has_other:
+        rows.append([Btn(text="📦 Другие образы", callback_data="buy:imgother")])
+    text = "💿 <b>Выберите операционную систему:</b>" if choices else "💿 <b>Выберите образ:</b>"
+    await msg.edit_text(text, reply_markup=kb(*rows, back("buy", "❌ Отмена")))
+
+
+@router.callback_query(F.data == "buy:imgother")
+async def other_images(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    buttons = [Btn(text=i["name"][:45], callback_data=f"buy:imgo:{n}") for n, i in enumerate(data["other_images"])]
+    await cb.message.edit_text("📦 <b>Другие образы</b> (приложения, панели, старые версии):",
+                               reply_markup=kb(*grid(buttons, 1), [Btn(text="⬅️ К списку ОС", callback_data="buy:imgback")]))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "buy:imgback")
+async def images_back(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    choices = [os_names.OsChoice(i["id"], i["name"], i["name"]) for i in data["images"]]
+    await _show_os(cb.message, choices, bool(data.get("other_images")))
+    await cb.answer()
 
 
 # ---------- 8. confirm ----------
-@router.callback_query(F.data.startswith("buy:img:"))
+@router.callback_query(F.data.startswith("buy:img:") | F.data.startswith("buy:imgo:"))
 async def confirm(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    image = data["images"][int(cb.data.split(":")[2])]
+    kind, idx = cb.data.split(":")[1:3]
+    image = (data["other_images"] if kind == "imgo" else data["images"])[int(idx)]
     await state.update_data(image=image)
     f = data["flavor"]
     text = (
         "🧾 <b>Подтверждение</b>\n\n"
         f"Провайдер: <b>{PROVIDERS[data['provider']]}</b>\n"
         f"Локация: <b>{hd.quote(data['region_label'])}</b>\n"
-        f"Нужный IP: <b>{data['prefix']}.x</b>\n"
+        f"Нужный IP: <code>{show_prefix(data['prefix'])}</code>\n"
         f"Тариф: <b>{hd.quote(f['name'])}</b> ({f['vcpus']} vCPU, {f['ram_mb']} MB"
         f"{', ' + f['price'] if f.get('price') else ''})\n"
         f"ОС: <b>{hd.quote(image['name'])}</b>\n"
         f"Количество: <b>{data['count']}</b>\n\n"
-        f"⚠️ Серверы с чужим IP будут удаляться и создаваться заново "
-        f"(максимум {config.max_attempts} созданий за задачу). Каждое создание может стоить денег."
+        + ("⚡ Быстрый режим: IP подбирается бесплатно через сетевые порты, сервер покупается "
+           "только на подходящий IP.\n" if data.get("network_id") and data["provider"] == "hostvds" else "")
+        + f"⚠️ Если быстрый режим недоступен — серверы с чужим IP удаляются сразу, как только видно IP "
+          f"(максимум {config.max_attempts} созданий). Каждое создание может стоить денег."
     )
     await cb.message.edit_text(text, reply_markup=kb(
         [Btn(text="✅ Купить", callback_data="buy:go")], back("buy", "❌ Отмена")))
@@ -304,9 +346,12 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
 # ---------- 9. run ----------
 def _progress_text(job: PurchaseJob, done: bool = False) -> str:
     head = "🏁 <b>Готово</b>" if done else "⏳ <b>Покупка идёт…</b>"
-    text = (f"{head}\n\nНужный IP: <b>{job.prefix}.x</b> в {hd.quote(job.region)}\n"
-            f"Найдено: <b>{len(job.kept)}/{job.count}</b> · создано: {job.attempts} · удалено: {job.deleted}\n\n")
-    text += "\n".join(hd.quote(line) for line in job.log[-12:])
+    text = f"{head}\n\nНужный IP: <code>{show_prefix(job.prefix)}</code> в {hd.quote(job.region)}\n"
+    if job.mode == "ports":
+        text += f"⚡ Проверено IP (бесплатно): <b>{job.ports_checked}</b>\n"
+    text += (f"Готово серверов: <b>{len(job.kept)}/{job.count}</b> · создано: {job.attempts} · "
+             f"удалено: {job.deleted}\n\n")
+    text += "\n".join(job.log[-12:])
     return text[:4000]
 
 
@@ -322,6 +367,8 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
     job = PurchaseJob(
         region=data["region"], flavor=Flavor(**data["flavor"]), image_id=data["image"]["id"],
         network_id=data.get("network_id"), prefix=data["prefix"], count=data["count"],
+        subnet_id=data.get("subnet_id"), max_port_attempts=config.max_port_attempts,
+        port_parallel=config.port_parallel,
         max_attempts=config.max_attempts, parallel=config.parallel,
         active_timeout=config.active_timeout, boot_volume_gb=config.boot_volume_gb,
     )

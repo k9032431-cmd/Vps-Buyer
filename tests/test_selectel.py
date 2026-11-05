@@ -118,7 +118,7 @@ async def scenario():
             assert await c.check() == "me@example.com, баланс 1234.50 ₽"
             regs = {r.region: r for r in await c.region_statuses()}
             assert regs["spb0"].available and regs["spb0"].city == "Санкт-Петербург" and regs["spb0"].country == "RU"
-            assert regs["spb0"].pools[0].prefix == "31"
+            assert regs["spb0"].pools[0].prefix == "31.184.1"
             assert not regs["spb1"].available and regs["spb1"].reason == "локация закрыта"
             flavors = await c.list_flavors("spb0")
             assert flavors[0].price == "200 ₽/мес" and flavors[0].disk_gb == 20, flavors

@@ -22,6 +22,9 @@ class Config:
     selectel_api_url: str = os.getenv("SELECTEL_API_URL", "https://api.vscale.io/v1")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "50"))
+    # Fast mode (HostVDS): max free port checks per job and how many at once.
+    max_port_attempts: int = int(os.getenv("MAX_PORT_ATTEMPTS", "500"))
+    port_parallel: int = int(os.getenv("PORT_PARALLEL", "10"))
     # How many servers are created at the same time.
     parallel: int = int(os.getenv("PARALLEL", "3"))
     # Seconds to wait for a server to become ACTIVE.

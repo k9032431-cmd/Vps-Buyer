@@ -6,7 +6,7 @@ from datetime import datetime
 
 import aiohttp
 
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24
 
 COMPUTE_MICROVERSION = "compute 2.47"
 
@@ -129,7 +129,7 @@ class HostVDSClient:
         return sorted(images, key=lambda i: i.name.lower())
 
     async def ip_pools(self, region: str) -> list[IpPool]:
-        """Public IPv4 subnets grouped by first octet, e.g. 94 / 123 / 207."""
+        """Public IPv4 /24 blocks (e.g. 95.182.87.#) available on the region's public networks."""
         nets = (await self._request("GET", "network", region, "/networks"))["networks"]
         subnets = (await self._request("GET", "network", region, "/subnets"))["subnets"]
         usable = {n["id"] for n in nets if n.get("router:external") or n.get("shared")} or {n["id"] for n in nets}
@@ -137,13 +137,29 @@ class HostVDSClient:
         for s in subnets:
             if s.get("ip_version") != 4 or s["network_id"] not in usable:
                 continue
-            net = ipaddress.ip_network(s["cidr"], strict=False)
-            if net.is_private:
+            if ipaddress.ip_network(s["cidr"], strict=False).is_private:
                 continue
-            prefix = s["cidr"].split(".")[0]
-            pool = pools.setdefault(prefix, IpPool(prefix, s["network_id"], []))
-            pool.cidrs.append(s["cidr"])
-        return sorted(pools.values(), key=lambda p: int(p.prefix))
+            for prefix in blocks24(s["cidr"], s.get("allocation_pools")):
+                pools.setdefault(prefix, IpPool(prefix, s["network_id"], [s["cidr"]], s.get("id")))
+        return sorted(pools.values(), key=lambda p: tuple(int(x) for x in p.prefix.split(".")))
+
+    # ---------- ports: free & fast way to pick an IP before buying a server ----------
+    supports_ports = True
+
+    async def create_port(self, region: str, network_id: str, subnet_id: str | None) -> tuple[str, str | None]:
+        port: dict = {"network_id": network_id, "name": "ip-hunt"}
+        if subnet_id:
+            port["fixed_ips"] = [{"subnet_id": subnet_id}]
+        data = (await self._request("POST", "network", region, "/ports", json={"port": port}))["port"]
+        ip = next((f["ip_address"] for f in data.get("fixed_ips", []) if ":" not in f["ip_address"]), None)
+        return data["id"], ip
+
+    async def delete_port(self, region: str, port_id: str) -> None:
+        try:
+            await self._request("DELETE", "network", region, f"/ports/{port_id}")
+        except HostVDSError as e:
+            if e.status != 404:
+                raise
 
     async def check(self) -> str:
         await self.authenticate()
@@ -191,12 +207,12 @@ class HostVDSClient:
         return st
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
-                            network_id: str | None, boot_volume_gb: int) -> Server:
-        server: dict = {
-            "name": name,
-            "flavorRef": flavor.id,
-            "networks": [{"uuid": network_id}] if network_id else "auto",
-        }
+                            network_id: str | None, boot_volume_gb: int, port_id: str | None = None) -> Server:
+        if port_id:
+            networks = [{"port": port_id}]
+        else:
+            networks = [{"uuid": network_id}] if network_id else "auto"
+        server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks}
         if flavor.disk_gb:
             server["imageRef"] = image_id
         else:  # flavor without local disk → boot from volume
@@ -213,21 +229,41 @@ class HostVDSClient:
         return Server(s["id"], s["name"], s["status"], ips)
 
     async def delete_server(self, region: str, server_id: str) -> None:
+        # Ports we created ourselves are not removed by Nova — find them first, clean up after.
+        try:
+            ports = (await self._request("GET", "network", region, "/ports",
+                                         params={"device_id": server_id}))["ports"]
+        except Exception:
+            ports = []
         try:
             await self._request("DELETE", "compute", region, f"/servers/{server_id}")
         except HostVDSError as e:
             if e.status != 404:
                 raise
+        for p in ports:
+            for _ in range(10):  # port is busy until Nova detaches it
+                try:
+                    await self.delete_port(region, p["id"])
+                    break
+                except HostVDSError:
+                    await asyncio.sleep(3)
+
+    async def wait_ip(self, region: str, server_id: str, timeout: int) -> Server:
+        """Returns as soon as the server has an IPv4 (often while still BUILD) — lets us reject fast."""
+        return await self._wait(region, server_id, timeout, need_active=False)
 
     async def wait_active(self, region: str, server_id: str, timeout: int) -> Server:
+        return await self._wait(region, server_id, timeout, need_active=True)
+
+    async def _wait(self, region: str, server_id: str, timeout: int, need_active: bool) -> Server:
         deadline = time.time() + timeout
         while True:
             s = await self.get_server(region, server_id)
-            if s.status == "ACTIVE" and s.ipv4:
+            if s.ipv4 and (s.status == "ACTIVE" or not need_active):
                 return s
             if s.status == "ERROR":
                 return s
             if time.time() > deadline:
                 s.status = "TIMEOUT"
                 return s
-            await asyncio.sleep(5)
+            await asyncio.sleep(2)

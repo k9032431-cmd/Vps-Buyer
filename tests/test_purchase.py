@@ -46,7 +46,7 @@ def make_app(ip_sequence):
 
     async def subnets(req):
         return web.json_response({"subnets": [
-            {"network_id": "pub", "ip_version": 4, "cidr": c} for c in ("94.103.80.0/24", "123.45.0.0/24", "207.1.2.0/24")
+            {"id": "sub-" + c, "network_id": "pub", "ip_version": 4, "cidr": c} for c in ("94.103.80.0/24", "123.45.0.0/24", "207.1.2.0/24")
         ] + [{"network_id": "pub", "ip_version": 6, "cidr": "2a00::/64"}]})
 
     app.router.add_post("/identity/v3/auth/tokens", tokens)
@@ -56,6 +56,93 @@ def make_app(ip_sequence):
     app.router.add_get("/net/v2.0/networks", networks)
     app.router.add_get("/net/v2.0/subnets", subnets)
     return app, deleted
+
+
+def make_port_app(ip_sequence):
+    """Fake OpenStack with Neutron ports: IPs come from ip_sequence, or from the requested subnet."""
+    app, _ = make_app(["0.0.0.0"])
+    ips = iter(ip_sequence)
+    st = {"ports": {}, "deleted_ports": [], "servers": {}, "deleted": [], "port_posts": 0}
+
+    async def create_port(req):
+        body = (await req.json())["port"]
+        st["port_posts"] += 1
+        fixed = body.get("fixed_ips")
+        ip = f"95.182.87.{st['port_posts']}" if fixed else next(ips)
+        pid = f"p{st['port_posts']}"
+        st["ports"][pid] = ip
+        return web.json_response({"port": {"id": pid, "fixed_ips": [{"ip_address": ip}]}}, status=201)
+
+    async def delete_port(req):
+        st["deleted_ports"].append(req.match_info["id"])
+        return web.Response(status=204)
+
+    async def list_ports(req):
+        sid = req.query.get("device_id")
+        return web.json_response({"ports": [{"id": p} for p, s in st.get("bound", {}).items() if s == sid]})
+
+    async def create(req):
+        body = (await req.json())["server"]
+        port = body["networks"][0]["port"]
+        sid = f"s{len(st['servers']) + 1}"
+        st["servers"][sid] = st["ports"][port]
+        st.setdefault("bound", {})[port] = sid
+        return web.json_response({"server": {"id": sid, "adminPass": "pw"}}, status=202)
+
+    async def get(req):
+        sid = req.match_info["id"]
+        return web.json_response({"server": {"id": sid, "name": sid, "status": "ACTIVE",
+                                             "addresses": {"pub": [{"addr": st["servers"][sid], "version": 4}]}}})
+
+    new = web.Application()
+    for r in app.router.routes():
+        path = r.resource.canonical
+        if path.startswith("/compute/servers") or path.startswith("/net/v2.0/ports"):
+            continue
+        new.router.add_route(r.method, path, r.handler)
+    new.router.add_post("/net/v2.0/ports", create_port)
+    new.router.add_get("/net/v2.0/ports", list_ports)
+    new.router.add_delete("/net/v2.0/ports/{id}", delete_port)
+    new.router.add_post("/compute/servers", create)
+    new.router.add_get("/compute/servers/{id}", get)
+
+    async def delete(req):
+        st["deleted"].append(req.match_info["id"])
+        return web.Response(status=204)
+    new.router.add_delete("/compute/servers/{id}", delete)
+    return new, st
+
+
+async def port_scenario():
+    from bot.providers.hostvds import Flavor
+    # 1) random network allocation: hunt until 2 IPs from 94.103.80.# show up
+    app, st = make_port_app(["123.45.0.5", "207.1.2.9", "94.103.80.11", "123.45.0.6", "94.103.80.12"] +
+                            [f"123.45.0.{i}" for i in range(10, 60)])
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        async with HostVDSClient(str(server.make_url("/identity")), "u", "p", "u") as c:
+            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "94.103.80", 2,
+                              max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10, port_parallel=5)
+            await run_purchase(c, job, lambda j: asyncio.sleep(0))
+            print("\n".join(job.log))
+            assert job.mode == "ports"
+            assert sorted(s.ipv4[0] for s in job.kept) == ["94.103.80.11", "94.103.80.12"]
+            assert job.attempts == 2 and job.deleted == 0, "servers bought only on matching IPs"
+            assert job.ports_checked == 5
+            assert sorted(st["deleted_ports"]) == ["p1", "p2", "p4"], st["deleted_ports"]  # wrong ones released
+            assert "<code>94.103.80.11</code>" in "\n".join(job.log)
+            # 2) exact /24 subnet → first try
+            job2 = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "95.182.87", 1,
+                               max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10,
+                               subnet_id="sub-95", port_parallel=1)
+            await run_purchase(c, job2, lambda j: asyncio.sleep(0))
+            assert job2.ports_checked == 1 and job2.kept[0].ipv4[0].startswith("95.182.87.")
+            # 3) deleting a server also deletes its port
+            await c.delete_server("eu-west2", job2.kept[0].id)
+            assert st["deleted_ports"][-1] == "p6", st["deleted_ports"]
+    finally:
+        await server.close()
 
 
 async def scenario():
@@ -70,7 +157,8 @@ async def scenario():
             await c.authenticate()
             assert c.regions() == ["eu-west2"]
             pools = await c.ip_pools("eu-west2")
-            assert [p.prefix for p in pools] == ["94", "123", "207"], pools
+            assert [p.prefix for p in pools] == ["94.103.80", "123.45.0", "207.1.2"], pools
+            assert pools[0].subnet_id == "sub-94.103.80.0/24"
             from bot.providers.hostvds import Flavor
             job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", "94", 2,
                               max_attempts=20, parallel=1, active_timeout=30, boot_volume_gb=10)
@@ -94,6 +182,11 @@ def test_purchase_loop():
     asyncio.run(scenario())
 
 
+def test_port_mode():
+    asyncio.run(port_scenario())
+
+
 if __name__ == "__main__":
     test_purchase_loop()
+    test_port_mode()
     print("OK")
