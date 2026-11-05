@@ -47,7 +47,7 @@ def landing_text(user: User) -> str:
 
 
 def landing_kb():
-    return kb([Btn(text=f"💬 Написать админу @{config.admin_contact}", url=f"https://t.me/{config.admin_contact}")])
+    return kb([Btn(text="💬 Написать админу", url=f"https://t.me/{config.admin_contact}")])
 
 
 def _user_line(user_id: int, username: str, full_name: str) -> str:
@@ -106,7 +106,7 @@ async def _decide(cb: CallbackQuery, bot: Bot, user_id: int, approve: bool) -> N
         else:
             await bot.send_message(user_id, "😔 <b>В доступе отказано</b>\n\n"
                                             f"Если это ошибка — напишите @{config.admin_contact}",
-                                   reply_markup=kb([Btn(text=f"💬 Написать админу @{config.admin_contact}",
+                                   reply_markup=kb([Btn(text="💬 Написать админу",
                                                         url=f"https://t.me/{config.admin_contact}")]))
     except Exception:
         log.exception("can't notify user %s", user_id)

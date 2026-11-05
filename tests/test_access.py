@@ -65,7 +65,7 @@ async def scenario():
     assert "<code>2002</code>" in landing, "the guest's ID is shown so they can send it to the admin"
     assert "HostVDS" not in landing and "Selectel" not in landing, "providers are not listed"
     buttons = last_markup(s)
-    assert len(buttons) == 1 and buttons[0].url == "https://t.me/oldarsi", "only the 'write to admin' button"
+    assert len(buttons) == 1 and buttons[0].url == "https://t.me/oldarsi" and buttons[0].text == "💬 Написать админу"
     # any button / command is gated
     await dp.feed_update(bot, cb(GUEST, "buy"))
     assert isinstance(s.calls[-1], EditMessageText) and "Доступ только по приглашению" in s.calls[-1].text
