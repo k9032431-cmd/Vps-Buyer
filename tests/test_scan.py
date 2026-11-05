@@ -14,6 +14,14 @@ from bot.handlers import access, accounts, buy, menu, servers, update  # noqa: E
 from bot.providers import selectel  # noqa: E402
 from tests.test_selectel import TOKEN, make_app  # noqa: E402
 from tests.test_servers_update import UID, FakeSession, cb_update  # noqa: E402
+from datetime import datetime  # noqa: E402
+from aiogram.types import Chat, Message, Update, User  # noqa: E402
+
+
+def text_update(n, text):
+    m = Message(message_id=n, date=datetime.now(), chat=Chat(id=UID, type="private"),
+                from_user=User(id=UID, is_bot=False, first_name="A"), text=text)
+    return Update(update_id=n, message=m)
 
 
 async def scenario():
@@ -58,6 +66,27 @@ async def scenario():
         assert "<code>31.184.2.#</code> — 3 из 5 (60%)" in report and "<code>5.188.1.#</code> — 2 из 5 (40%)" in report
         assert len(st["deleted"]) == 5, "every probe server is deleted"
         assert buy.JOBS == {}
+
+        # one probe server at a time (create → IP → delete → next)
+        assert st["max_alive"] == 1, st["max_alive"]
+
+        # custom number: "✏️ Своё число" → 3
+        await dp.feed_update(bot, cb_update(10, "buy:reg:0"))
+        await dp.feed_update(bot, cb_update(11, "buy:scan"))
+        assert "✏️ Своё число (до 200)" in [b.text for row in s.calls[-1].reply_markup.inline_keyboard for b in row]
+        await dp.feed_update(bot, cb_update(12, "buy:scannum"))
+        assert "Сколько серверов проверить" in s.texts()[-1]
+        await dp.feed_update(bot, text_update(13, "abc"))
+        assert "Отправьте число от 1 до 200" in s.texts()[-1]
+        await dp.feed_update(bot, text_update(14, "3"))
+        assert "Идёт разведка IP" in s.texts()[-1]
+        for _ in range(500):
+            await orig_sleep(0.02)
+            if sum("Отчёт разведки" in t for t in s.texts()) == 2:
+                break
+        report2 = [t for t in s.texts() if "Отчёт разведки" in t][-1]
+        assert "Проверено серверов: <b>3</b>" in report2, report2
+        assert len(st["deleted"]) == 8
 
         # the blocks now show up in the IP step
         await dp.feed_update(bot, cb_update(4, "buy:reg:0"))

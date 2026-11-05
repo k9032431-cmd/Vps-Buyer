@@ -33,6 +33,7 @@ MAX_IP_BUTTONS = 60
 class Buy(StatesGroup):
     custom_prefix = State()
     count = State()
+    scan_count = State()
 
 
 async def _client_for(cb_or_msg, state: FSMContext):
@@ -666,15 +667,16 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
     image_id = choices[0].id if choices else images[0].id
     await state.update_data(scan={"flavor": asdict(flavor), "image_id": image_id, "hour": hour})
     rows = [[Btn(text=f"🔍 {n} серверов · ≈{n * hour:.2f} ₽", callback_data=f"buy:scango:{n}")] for n in SCAN_SIZES]
+    rows.append([Btn(text=f"✏️ Своё число (до {config.scan_max})", callback_data="buy:scannum")])
     rows.append(back("buy:ipback", "⬅️ Назад к выбору IP"))
     await cb.message.edit_text(
         "🔍 <b>Разведка IP</b>\n"
         f"📍 {hd.quote(data['region_label'])}\n\n"
         "У Selectel VDS нет списка подсетей, поэтому бот один раз проверит их сам:\n"
-        "1️⃣ создаст несколько самых дешёвых серверов\n"
-        "2️⃣ запишет, какие IP они получили\n"
-        "3️⃣ сразу удалит каждый сервер\n"
-        "4️⃣ пришлёт отчёт: какие блоки <code>a.b.c.#</code> сейчас выдаются\n\n"
+        "1️⃣ создаст самый дешёвый сервер\n"
+        "2️⃣ запишет, какой IP он получил\n"
+        "3️⃣ сразу удалит сервер и перейдёт к следующему\n"
+        "4️⃣ в конце пришлёт отчёт: какие блоки <code>a.b.c.#</code> сейчас выдаются\n\n"
         f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} ₽/час\n"
         "💸 Оплата почасовая — каждый пробный сервер обходится примерно в час тарифа.\n\n"
         "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP.",
@@ -683,22 +685,64 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("buy:scango:"))
 async def scan_go(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    uid = cb.from_user.id
-    if uid in JOBS:
-        return await cb.answer("⏳ Уже идёт покупка или разведка", show_alert=True)
+    await cb.answer()
+    await start_scan(cb.message, state, bot, cb.from_user.id, int(cb.data.split(":")[2]), edit=True)
+
+
+@router.callback_query(F.data == "buy:scannum")
+async def scan_custom(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if "scan" not in data:
         return await cb.answer("🔁 Откройте разведку заново", show_alert=True)
+    await state.set_state(Buy.scan_count)
+    hour = data["scan"]["hour"]
+    await cb.message.edit_text(
+        "✏️ <b>Сколько серверов проверить?</b>\n\n"
+        f"Отправьте число от 1 до {config.scan_max}, например <code>100</code>.\n\n"
+        f"💸 Примерно {hour:g} ₽ за каждый сервер · 100 серверов ≈ {100 * hour:.2f} ₽\n"
+        "⏱ Серверы проверяются по одному: создал → записал IP → удалил → следующий.",
+        reply_markup=kb(back("buy:scan", "⬅️ Назад")))
+    await cb.answer()
+
+
+@router.message(Buy.scan_count)
+async def scan_custom_set(message: Message, state: FSMContext, bot: Bot):
+    raw = (message.text or "").strip()
+    if not raw.isdigit() or not 1 <= int(raw) <= config.scan_max:
+        await message.answer(f"⚠️ Отправьте число от 1 до {config.scan_max}")
+        return
+    await state.set_state(None)
+    await start_scan(message, state, bot, message.from_user.id, int(raw), edit=False)
+
+
+async def start_scan(msg: Message, state: FSMContext, bot: Bot, uid: int, samples: int, edit: bool):
+    if uid in JOBS:
+        await msg.answer("⏳ Уже идёт покупка или разведка — дождитесь окончания или остановите её.")
+        return
+    data = await state.get_data()
+    if "scan" not in data:
+        await msg.answer("🔁 Откройте разведку заново")
+        return
     acc = await db.get_account(uid, data["account_id"])
     job = ScanJob(region=data["region"], flavor=Flavor(**data["scan"]["flavor"]), image_id=data["scan"]["image_id"],
-                  samples=int(cb.data.split(":")[2]))
+                  samples=samples, parallel=config.scan_parallel)
     JOBS[uid] = job
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
     label = data["region_label"]
-    await cb.message.edit_text(_scan_text(job, label), reply_markup=cancel_kb)
-    await cb.answer()
+    if edit:
+        await msg.edit_text(_scan_text(job, label), reply_markup=cancel_kb)
+        progress_msg = msg
+    else:
+        progress_msg = await msg.answer(_scan_text(job, label), reply_markup=cancel_kb)
     region_idx = data["regions"].index(data["region"])
-    asyncio.create_task(_run_scan(bot, cb.message, uid, acc, job, cancel_kb, label, region_idx))
+    asyncio.create_task(_run_scan(bot, progress_msg, uid, acc, job, cancel_kb, label, region_idx))
+
+
+def _fmt_duration(seconds: float) -> str:
+    minutes = int(seconds // 60)
+    if minutes >= 60:
+        return f"{minutes // 60} ч {minutes % 60} мин"
+    return f"{minutes} мин" if minutes else "меньше минуты"
 
 
 def _scan_text(job: ScanJob, label: str, done: bool = False) -> str:
@@ -706,6 +750,12 @@ def _scan_text(job: ScanJob, label: str, done: bool = False) -> str:
     text = (f"{head}\n\n📍 {hd.quote(label)}\n"
             f"🆕 Создано: <b>{job.created}/{job.samples}</b>   🗑 Удалено: <b>{job.deleted}</b>   "
             f"🌐 IP: <b>{len(job.ips)}</b>\n")
+    blocks = job.blocks()
+    if blocks:
+        text += f"📊 Блоков: <b>{len(blocks)}</b> · чаще всего <code>{blocks[0][0]}.#</code> ({blocks[0][1]})\n"
+    eta = job.eta_seconds()
+    if not done and eta:
+        text += f"⏱ Осталось примерно: <b>{_fmt_duration(eta)}</b>\n"
     if job.log:
         text += "\n" + "\n".join(job.log[-12:])
     return text[:4000]

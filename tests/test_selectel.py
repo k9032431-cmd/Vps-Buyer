@@ -25,7 +25,7 @@ TOKEN = "tok123"
 
 def make_app(ips):
     ips = itertools.cycle(ips)
-    state = {"scalets": {}, "deleted": [], "created": [], "rate_limited": False}
+    state = {"scalets": {}, "deleted": [], "created": [], "rate_limited": False, "alive": 0, "max_alive": 0}
     app = web.Application()
 
     @web.middleware
@@ -73,6 +73,8 @@ def make_app(ips):
             state["scalets"][ctid] = {"ctid": ctid, "name": body["name"], "location": body["location"],
                                       "status": "defined", "public_address": {}, "polls": 0, "ip": next(ips)}
             state["created"].append(body)
+            state["alive"] += 1
+            state["max_alive"] = max(state["max_alive"], state["alive"])
             return web.json_response({k: v for k, v in state["scalets"][ctid].items() if k not in ("polls", "ip")})
         return web.json_response([{"ctid": 1, "location": "spb0", "status": "started",
                                    "public_address": {"address": "31.184.1.1"}}])
@@ -81,6 +83,7 @@ def make_app(ips):
         ctid = int(req.match_info["id"])
         if req.method == "DELETE":
             state["deleted"].append(ctid)
+            state["alive"] -= 1
             return web.json_response({"ctid": ctid, "status": "deleted"})
         s = state["scalets"][ctid]
         s["polls"] += 1

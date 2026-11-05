@@ -28,6 +28,9 @@ class Config:
     # Fast mode (HostVDS): max free port checks per job and how many at once.
     max_port_attempts: int = int(os.getenv("MAX_PORT_ATTEMPTS", "500"))
     port_parallel: int = int(os.getenv("PORT_PARALLEL", "10"))
+    # Selectel IP scouting: max servers per run and how many exist at once (1 = strictly one by one).
+    scan_max: int = int(os.getenv("SCAN_MAX", "200"))
+    scan_parallel: int = int(os.getenv("SCAN_PARALLEL", "1"))
     # How many servers are created at the same time.
     parallel: int = int(os.getenv("PARALLEL", "3"))
     # Seconds to wait for a server to become ACTIVE.

@@ -1,12 +1,13 @@
 """IP scouting for providers without a subnet API (Selectel VDS).
 
-Creates a few of the cheapest servers, notes the public IP each one gets as soon as it appears and
-deletes the server right away. The /24 blocks seen are reported and remembered, so the IP step of the
+Creates the cheapest server, notes the public IP it gets as soon as it appears, deletes it and moves
+on to the next one (one at a time by default, SCAN_PARALLEL to change). The /24 blocks seen are reported and remembered, so the IP step of the
 purchase can offer them."""
 import asyncio
 import html
 import logging
 import secrets
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -23,7 +24,7 @@ class ScanJob:
     flavor: Flavor
     image_id: str
     samples: int
-    parallel: int = 3
+    parallel: int = 1          # one at a time: create → note IP → delete → next
     ip_timeout: int = 300
     created: int = 0
     deleted: int = 0
@@ -32,6 +33,14 @@ class ScanJob:
     cancelled: bool = False
     error: str | None = None
     leftovers: list[str] = field(default_factory=list)  # servers we could not delete
+    started: float = field(default_factory=time.time)
+    finished_probes: int = 0
+
+    def eta_seconds(self) -> float | None:
+        if not self.finished_probes:
+            return None
+        per_probe = (time.time() - self.started) / self.finished_probes  # wall time, parallelism included
+        return per_probe * (self.samples - self.finished_probes)
 
     def blocks(self) -> list[tuple[str, int]]:
         return Counter(prefix24(ip) for ip in self.ips).most_common()
@@ -77,6 +86,7 @@ async def run_scan(client, job: ScanJob, on_progress: Callable[[ScanJob], Awaita
                 job.log.append(f"⚠️ {html.escape(str(e))[:200]}")
                 if _fatal(e):
                     job.error = str(e)
+            job.finished_probes += 1
             await on_progress(job)
 
     await asyncio.gather(*(one() for _ in range(job.samples)))
