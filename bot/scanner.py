@@ -29,6 +29,7 @@ class ScanJob:
     created: int = 0
     deleted: int = 0
     ips: list[str] = field(default_factory=list)
+    subnets: list[str] = field(default_factory=list)  # CIDRs, when the provider reports masks
     log: list[str] = field(default_factory=list)
     cancelled: bool = False
     error: str | None = None
@@ -60,6 +61,7 @@ async def _probe(client, job: ScanJob) -> None:
         state = await client.wait_ip(job.region, srv.id, job.ip_timeout)
         if state.ipv4:
             job.ips += state.ipv4
+            job.subnets += [c for c in state.cidrs if c not in job.subnets]
             job.log.append("🔎 " + ", ".join(f"<code>{html.escape(ip)}</code>" for ip in state.ipv4))
         else:
             job.log.append(f"⚠️ сервер не получил IP ({html.escape(state.status)})")

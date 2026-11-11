@@ -16,7 +16,7 @@ from ..scanner import ScanJob, run_scan
 from ..config import config
 from .. import os_names
 from ..providers import SCOUT_PROVIDERS, Flavor, IpPool, ProviderError
-from ..providers.base import prefix24
+from ..providers.base import prefix24, subnet_blocks
 from ..providers.hostvds_public import money
 from ..keyboards import PROVIDERS, back, grid, kb
 from .accounts import accounts_view, make_client
@@ -153,7 +153,8 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         log.warning("ip_pools failed: %s", e)
         pools = []
-    pools = _merge_seen(pools, await db.seen_ips(data["provider"], region))
+    pools = _merge_seen(pools, await db.seen_ips(data["provider"], region),
+                        await db.subnets(data["provider"], region))
     full = [p for p in pools if p.free == 0]          # provider says: no free addresses there
     pools = [p for p in pools if p.free != 0]
     await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full))
@@ -226,9 +227,15 @@ async def ip_all_or_clear(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-def _merge_seen(pools: list[IpPool], seen: list[str]) -> list[IpPool]:
-    """Adds /24 blocks of IPs the provider gave out before (for providers without a subnet API)."""
+def _merge_seen(pools: list[IpPool], seen: list[str], subnets: list[str] = ()) -> list[IpPool]:
+    """Adds /24 blocks of IPs the provider gave out before and of whole subnets learned from masks
+    (for providers without a subnet API)."""
     known = {p.prefix: p for p in pools}
+    for cidr in subnets:
+        for prefix in subnet_blocks(cidr):
+            pool = known.setdefault(prefix, IpPool(prefix, None, []))
+            if pool.network_id is None and cidr not in pool.cidrs:
+                pool.cidrs.append(cidr)
     for ip in seen:
         prefix = prefix24(ip)
         if prefix not in known:
@@ -610,6 +617,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
         JOBS.pop(uid, None)
 
     await db.add_seen_ips(acc.provider, job.region, job.seen)
+    await db.add_subnets(acc.provider, job.region, job.subnets)
     for server in job.kept:  # make sure every bought server is in "My servers"
         try:
             await save(server)
@@ -648,7 +656,7 @@ async def cancel(cb: CallbackQuery):
 
 # ---------- IP scouting (Selectel VDS: no subnet API) ----------
 SCAN_SIZES = (5, 10, 20)
-SCAN_CURRENCY = {"selectel": "₽", "timeweb": "₽", "aeza": "€"}
+SCAN_CURRENCY = {"selectel": "₽", "timeweb": "₽", "aeza": "€", "serverspace": "₽"}
 
 
 @router.callback_query(F.data == "buy:scan")
@@ -790,6 +798,7 @@ async def _run_scan(bot: Bot, msg: Message, uid: int, acc: db.Account, job: Scan
 
     if job.ips:
         await db.add_seen_ips(acc.provider, job.region, job.ips)
+    await db.add_subnets(acc.provider, job.region, job.subnets)
     try:
         await msg.edit_text(_scan_text(job, label, done=True))
     except Exception:
@@ -801,6 +810,9 @@ async def _run_scan(bot: Bot, msg: Message, uid: int, acc: db.Account, job: Scan
     if blocks:
         lines.append(f"🌐 Найдено блоков: <b>{len(blocks)}</b>\n")
         lines += [f"▫️ <code>{p}.#</code> — {n} из {len(job.ips)} ({n * 100 // len(job.ips)}%)" for p, n in blocks]
+        if job.subnets:
+            lines.append("\n🧩 <b>Подсети</b> (по маске IP — все их блоки добавлены в выбор IP):")
+            lines += [f"▫️ <code>{c}</code>" for c in job.subnets[:20]]
         lines.append("\n💡 Чем чаще блок выпадал, тем быстрее бот купит сервер с IP из него.\n"
                      "✅ Блоки сохранены — они уже есть в выборе IP.")
     else:

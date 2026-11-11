@@ -48,6 +48,7 @@ class PurchaseJob:
     mode: str = ""               # "ports" | "servers"
     log: list[str] = field(default_factory=list)   # HTML-safe lines
     seen: list[str] = field(default_factory=list)  # every IP the provider gave us
+    subnets: list[str] = field(default_factory=list)  # their subnets (CIDR), when the provider reports masks
     cancelled: bool = False
     error: str | None = None
 
@@ -173,6 +174,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
     try:
         state = await client.wait_ip(job.region, srv.id, job.active_timeout)
         job.seen += state.ipv4
+        job.subnets += [c for c in state.cidrs if c not in job.subnets]
         good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefixes)), None)
         if good and state.status != "ERROR" and len(job.kept) < job.count and not job.cancelled:
             if state.status != "ACTIVE":

@@ -71,6 +71,15 @@ def blocks24(cidr: str, allocation_pools: list[dict] | None = None, limit: int =
     return result
 
 
+def subnet_blocks(cidr: str, max_blocks: int = 16) -> list[str]:
+    """/24 blocks of a subnet learned from an IP's mask. Wide subnets (> /20) are not expanded:
+    the provider is unlikely to hand out every block of them."""
+    net = ipaddress.ip_network(cidr, strict=False)
+    if net.num_addresses > 256 * max_blocks:
+        return []
+    return blocks24(cidr)
+
+
 @dataclass
 class RegionStatus:
     region: str
@@ -89,3 +98,4 @@ class Server:
     status: str
     ipv4: list[str]
     admin_pass: str | None = None
+    cidrs: list[str] = field(default_factory=list)   # public subnets of its IPs, when the provider tells

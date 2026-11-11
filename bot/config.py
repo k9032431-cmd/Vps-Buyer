@@ -25,6 +25,7 @@ class Config:
     selectel_api_url: str = os.getenv("SELECTEL_API_URL", "https://api.vscale.io/v1")
     timeweb_api_url: str = os.getenv("TIMEWEB_API_URL", "https://api.timeweb.cloud")
     aeza_api_url: str = os.getenv("AEZA_API_URL", "https://my.aeza.net/api")
+    serverspace_api_url: str = os.getenv("SERVERSPACE_API_URL", "https://api.serverspace.ru")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "50"))
     # Fast mode (HostVDS): max free port checks per job and how many at once.

@@ -1,14 +1,14 @@
 # VPS Buyer — Telegram-бот для покупки серверов
 
-Бот покупает облачные серверы у провайдеров **HostVDS**, **Selectel VDS** (vds.selectel.ru), **Timeweb Cloud**
-и **Aeza** и добивается нужного IP:
+Бот покупает облачные серверы у провайдеров **HostVDS**, **Selectel VDS** (vds.selectel.ru), **Timeweb Cloud**,
+**Aeza** и **Serverspace** и добивается нужного IP:
 если выданный IP не из выбранной подсети, сервер удаляется и создаётся новый —
 пока не наберётся нужное количество серверов с нужным IP.
 
 ## Сценарий
 
 1. `/start` → главное меню (Мои серверы, Профиль, Аккаунты, Инфо, **🛒 Купить сервер**).
-2. **Купить сервер** → провайдер (HostVDS / Selectel VDS / Timeweb Cloud / Aeza) → аккаунт (или «➕ Подключить»).
+2. **Купить сервер** → провайдер (HostVDS / Selectel VDS / Timeweb Cloud / Aeza / Serverspace) → аккаунт (или «➕ Подключить»).
 3. Бот показывает только **доступные локации** с флагом и городом (🇫🇷 Париж · eu-west2, 🇱🇻 Рига 1 · eu-north2…).
    Для HostVDS данные берутся из публичного API сайта `hostvds.com/api/regions/` (город, страна,
    «нет в наличии», «создание закрыто», техработы, свободные IPv4). Если сайт недоступен — бот сам
@@ -76,7 +76,19 @@ my.aeza.net → **Настройки → API** → создайте ключ и 
 стоит оплаченный час (Aeza не возвращает деньги). Цены — в евро. Пароль root бот ставит сам после
 запуска сервера (`changePassword`).
 
-У Selectel, Timeweb и Aeza нет API со списком подсетей — для них работает «🔍 Разведать доступные IP».
+## Подключение Serverspace
+
+my.serverspace.ru → **API** → создайте ключ с правом «VstackCloud: Edit» и отправьте боту. API:
+`https://api.serverspace.ru`, заголовок `X-API-KEY`. Конфигурации собираются из CPU / RAM, цена
+считается через `/servers/price`, пароль root выдаёт Serverspace.
+
+**Подсети по маске.** Serverspace отдаёт IP сервера вместе с маской сети, поэтому по одному серверу
+(вашему, купленному или пробному) бот узнаёт всю подсеть (например, `95.182.80.0/22`) и показывает все
+её блоки `a.b.c.#` в выборе IP — как у HostVDS, только без счётчика свободных адресов. Подсети шире `/20`
+не разворачиваются. Дополнительные публичные интерфейсы Serverspace списывает за месяц сразу, поэтому
+бот не перебирает IP через них — только через серверы.
+
+У Selectel, Timeweb, Aeza и Serverspace нет API со списком подсетей — для них работает «🔍 Разведать доступные IP».
 
 ## Подключение аккаунта HostVDS
 
@@ -108,7 +120,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`
 
 ## Доступ по приглашению
 
@@ -136,7 +148,8 @@ bot/
   config.py        настройки из .env
   db.py            SQLite: аккаунты и купленные серверы
   providers/       клиенты провайдеров: hostvds.py (OpenStack), selectel.py (api.vscale.io),
-                   timeweb.py (api.timeweb.cloud), aeza.py (my.aeza.net/api)
+                   timeweb.py (api.timeweb.cloud), aeza.py (my.aeza.net/api),
+                   serverspace.py (api.serverspace.ru)
   buyer.py         цикл «купить → проверить IP → удалить/оставить»
   keyboards.py     клавиатуры
   handlers/        меню, аккаунты, покупка

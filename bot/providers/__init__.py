@@ -3,13 +3,15 @@ from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
 from .hostvds import HostVDSClient
 from .aeza import AezaClient
 from .selectel import SelectelVDSClient
+from .serverspace import ServerspaceClient
 from .timeweb import TimewebClient
 
-PROVIDERS = {"hostvds": "HostVDS", "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza"}
+PROVIDERS = {"hostvds": "HostVDS", "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
+             "serverspace": "Serverspace"}
 # Providers without a subnet API: IP blocks are learned from servers and IP scouting.
-SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza"}
+SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace"}
 # Providers connected with a single API token (stored in Account.password).
-TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza"}
+TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace"}
 
 
 def make_client(provider: str, username: str, password: str, project_name: str):
@@ -20,6 +22,8 @@ def make_client(provider: str, username: str, password: str, project_name: str):
         return TimewebClient(password, config.timeweb_api_url)
     if provider == "aeza":
         return AezaClient(password, config.aeza_api_url)
+    if provider == "serverspace":
+        return ServerspaceClient(password, config.serverspace_api_url)
     return HostVDSClient(config.hostvds_auth_url, username, password, project_name)
 
 

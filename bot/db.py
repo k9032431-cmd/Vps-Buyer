@@ -62,6 +62,12 @@ CREATE TABLE IF NOT EXISTS ip_seen (
     ip TEXT NOT NULL,
     PRIMARY KEY (provider, region, ip)
 );
+CREATE TABLE IF NOT EXISTS subnets_seen (
+    provider TEXT NOT NULL,
+    region TEXT NOT NULL,
+    cidr TEXT NOT NULL,
+    PRIMARY KEY (provider, region, cidr)
+);
 CREATE TABLE IF NOT EXISTS region_geo (
     provider TEXT NOT NULL,
     region TEXT NOT NULL,
@@ -255,3 +261,19 @@ async def list_users(status: str) -> list[BotUser]:
         rows = await (await db.execute(
             f"SELECT {_USER_COLS} FROM users WHERE status=? ORDER BY requested_at DESC", (status,))).fetchall()
     return [BotUser(*r) for r in rows]
+
+
+async def add_subnets(provider: str, region: str, cidrs: list[str]) -> None:
+    if not cidrs:
+        return
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.executemany("INSERT OR IGNORE INTO subnets_seen (provider, region, cidr) VALUES (?,?,?)",
+                             [(provider, region, c) for c in cidrs])
+        await db.commit()
+
+
+async def subnets(provider: str, region: str) -> list[str]:
+    async with aiosqlite.connect(config.db_path) as db:
+        rows = await (await db.execute(
+            "SELECT cidr FROM subnets_seen WHERE provider=? AND region=?", (provider, region))).fetchall()
+    return [r[0] for r in rows]
