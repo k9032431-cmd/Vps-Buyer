@@ -1,14 +1,14 @@
 # VPS Buyer — Telegram-бот для покупки серверов
 
 Бот покупает облачные серверы у провайдеров **HostVDS**, **Selectel VDS** (vds.selectel.ru), **Timeweb Cloud**,
-**Aeza** и **Serverspace** и добивается нужного IP:
+**Aeza**, **Serverspace** и **DigitalOcean** и добивается нужного IP:
 если выданный IP не из выбранной подсети, сервер удаляется и создаётся новый —
 пока не наберётся нужное количество серверов с нужным IP.
 
 ## Сценарий
 
 1. `/start` → главное меню (Мои серверы, Профиль, Аккаунты, Инфо, **🛒 Купить сервер**).
-2. **Купить сервер** → провайдер (HostVDS / Selectel VDS / Timeweb Cloud / Aeza / Serverspace) → аккаунт (или «➕ Подключить»).
+2. **Купить сервер** → провайдер (HostVDS / Selectel VDS / Timeweb Cloud / Aeza / Serverspace / DigitalOcean) → аккаунт (или «➕ Подключить»).
 3. Бот показывает только **доступные локации** с флагом и городом (🇫🇷 Париж · eu-west2, 🇱🇻 Рига 1 · eu-north2…).
    Для HostVDS данные берутся из публичного API сайта `hostvds.com/api/regions/` (город, страна,
    «нет в наличии», «создание закрыто», техработы, свободные IPv4). Если сайт недоступен — бот сам
@@ -88,6 +88,19 @@ my.serverspace.ru → **API** → создайте ключ с правом «Vs
 не разворачиваются. Дополнительные публичные интерфейсы Serverspace списывает за месяц сразу, поэтому
 бот не перебирает IP через них — только через серверы.
 
+## Подключение DigitalOcean
+
+cloud.digitalocean.com → **API → Tokens** → токен с правами Read и Write → отправьте боту.
+API: `https://api.digitalocean.com/v2`.
+
+**Подсети с маской — до покупки.** DigitalOcean публикует геофид со всеми своими подсетями по городам
+(`https://www.digitalocean.com/geo/google.csv`). На шаге выбора IP бот показывает подсети выбранного
+дата-центра: сначала группы по первым двум числам (`142.93.#.#` · 2), внутри — подсети с маской
+(`142.93.96.0/20` · 16 блоков) с галочками. Можно отметить сколько угодно и вписать свою подсеть
+(`46.101.128.0/18`). Дроплет считается подходящим, если его IP внутри любой выбранной подсети; остальные
+удаляются. Пароль root задаётся скриптом в `user_data`. Геофид не различает дата-центры одного города
+(nyc1 / nyc3, sfo2 / sfo3) — для них показываются подсети всего города.
+
 У Selectel, Timeweb, Aeza и Serverspace нет API со списком подсетей — для них работает «🔍 Разведать доступные IP».
 
 ## Подключение аккаунта HostVDS
@@ -120,7 +133,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`
 
 ## Доступ по приглашению
 
@@ -149,7 +162,7 @@ bot/
   db.py            SQLite: аккаунты и купленные серверы
   providers/       клиенты провайдеров: hostvds.py (OpenStack), selectel.py (api.vscale.io),
                    timeweb.py (api.timeweb.cloud), aeza.py (my.aeza.net/api),
-                   serverspace.py (api.serverspace.ru)
+                   serverspace.py (api.serverspace.ru), digitalocean.py (api.digitalocean.com)
   buyer.py         цикл «купить → проверить IP → удалить/оставить»
   keyboards.py     клавиатуры
   handlers/        меню, аккаунты, покупка

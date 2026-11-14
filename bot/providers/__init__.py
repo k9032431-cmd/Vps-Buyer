@@ -2,16 +2,19 @@ from ..config import config
 from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
 from .hostvds import HostVDSClient
 from .aeza import AezaClient
+from .digitalocean import DigitalOceanClient
 from .selectel import SelectelVDSClient
 from .serverspace import ServerspaceClient
 from .timeweb import TimewebClient
 
 PROVIDERS = {"hostvds": "HostVDS", "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
-             "serverspace": "Serverspace"}
+             "serverspace": "Serverspace", "digitalocean": "DigitalOcean"}
 # Providers without a subnet API: IP blocks are learned from servers and IP scouting.
 SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace"}
 # Providers connected with a single API token (stored in Account.password).
-TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace"}
+TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean"}
+# Providers whose full subnet list is known up front (prefixes are CIDRs, chosen by mask).
+SUBNET_PROVIDERS = {"digitalocean"}
 
 
 def make_client(provider: str, username: str, password: str, project_name: str):
@@ -24,7 +27,9 @@ def make_client(provider: str, username: str, password: str, project_name: str):
         return AezaClient(password, config.aeza_api_url)
     if provider == "serverspace":
         return ServerspaceClient(password, config.serverspace_api_url)
+    if provider == "digitalocean":
+        return DigitalOceanClient(password, config.do_api_url)
     return HostVDSClient(config.hostvds_auth_url, username, password, project_name)
 
 
-__all__ = ["PROVIDERS", "SCOUT_PROVIDERS", "TOKEN_PROVIDERS", "make_client", "Flavor", "Image", "IpPool", "ProviderError", "RegionStatus", "Server"]
+__all__ = ["PROVIDERS", "SCOUT_PROVIDERS", "SUBNET_PROVIDERS", "TOKEN_PROVIDERS", "make_client", "Flavor", "Image", "IpPool", "ProviderError", "RegionStatus", "Server"]

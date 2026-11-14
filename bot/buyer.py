@@ -9,6 +9,7 @@ it finishes booting), delete it right away if the IP is wrong.
 """
 import asyncio
 import html
+import ipaddress
 import logging
 import secrets
 from dataclasses import dataclass, field
@@ -54,9 +55,17 @@ class PurchaseJob:
 
 
 def ip_matches(ip: str, prefixes: str | list[str]) -> bool:
+    """A prefix is either the start of an address ("95.182.87") or a subnet with a mask ("142.93.96.0/20")."""
     if isinstance(prefixes, str):
         prefixes = [prefixes]
     for prefix in prefixes:
+        if "/" in prefix:
+            try:
+                if ipaddress.ip_address(ip) in ipaddress.ip_network(prefix, strict=False):
+                    return True
+            except ValueError:
+                pass
+            continue
         prefix = prefix.rstrip(".#").rstrip(".")
         if ip == prefix or ip.startswith(prefix + "."):
             return True

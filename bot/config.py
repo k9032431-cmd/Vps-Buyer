@@ -26,6 +26,8 @@ class Config:
     timeweb_api_url: str = os.getenv("TIMEWEB_API_URL", "https://api.timeweb.cloud")
     aeza_api_url: str = os.getenv("AEZA_API_URL", "https://my.aeza.net/api")
     serverspace_api_url: str = os.getenv("SERVERSPACE_API_URL", "https://api.serverspace.ru")
+    do_api_url: str = os.getenv("DO_API_URL", "https://api.digitalocean.com/v2")
+    do_geofeed_url: str = os.getenv("DO_GEOFEED_URL", "https://www.digitalocean.com/geo/google.csv")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "50"))
     # Fast mode (HostVDS): max free port checks per job and how many at once.

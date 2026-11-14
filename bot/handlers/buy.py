@@ -1,4 +1,5 @@
 import asyncio
+import ipaddress
 import logging
 import time
 from dataclasses import asdict
@@ -15,7 +16,7 @@ from ..buyer import PurchaseJob, run_purchase
 from ..scanner import ScanJob, run_scan
 from ..config import config
 from .. import os_names
-from ..providers import SCOUT_PROVIDERS, Flavor, IpPool, ProviderError
+from ..providers import SCOUT_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
 from ..providers.base import prefix24, subnet_blocks
 from ..providers.hostvds_public import money
 from ..keyboards import PROVIDERS, back, grid, kb
@@ -153,16 +154,123 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         log.warning("ip_pools failed: %s", e)
         pools = []
-    pools = _merge_seen(pools, await db.seen_ips(data["provider"], region),
-                        await db.subnets(data["provider"], region))
+    if data["provider"] not in SUBNET_PROVIDERS:  # full subnet list from the provider needs no guessing
+        pools = _merge_seen(pools, await db.seen_ips(data["provider"], region),
+                            await db.subnets(data["provider"], region))
     full = [p for p in pools if p.free == 0]          # provider says: no free addresses there
     pools = [p for p in pools if p.free != 0]
-    await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full))
+    await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full),
+                            ip_group=None)
     await render_ip_screen(cb.message, state, edit=True)
+
+
+def _subnet_mode(pools: list[dict]) -> bool:
+    return bool(pools) and "/" in pools[0]["prefix"]
+
+
+def _fit(lines: list[str], budget: int) -> str:
+    """Join whole lines up to a size budget (cutting inside an HTML tag would break the message)."""
+    out, used = [], 0
+    for i, line in enumerate(lines):
+        if used + len(line) + 1 > budget:
+            out.append(f"… и ещё {len(lines) - i} — все есть на кнопках ниже")
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
+def _plural_subnets(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return "подсеть"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "подсети"
+    return "подсетей"
+
+
+def _group(cidr: str) -> str:
+    return ".".join(cidr.split(".")[:2])
+
+
+def _blocks(cidr: str) -> int:
+    return max(1, ipaddress.ip_network(cidr, strict=False).num_addresses // 256)
+
+
+async def _send(msg: Message, text: str, markup, edit: bool):
+    if edit:
+        await msg.edit_text(text[:4000], reply_markup=markup)
+    else:
+        await msg.answer(text[:4000], reply_markup=markup)
+
+
+async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
+    """Providers with a full subnet list (DigitalOcean): groups by the first two numbers → subnets with a mask."""
+    data = await state.get_data()
+    pools, selected, custom = data["pools"], set(data.get("selected", [])), data.get("custom", [])
+    group = data.get("ip_group")
+    total = len(selected) + len(custom)
+    rows = []
+    if group is None:
+        groups: dict[str, list[int]] = {}
+        for i, p in enumerate(pools):
+            groups.setdefault(_group(p["prefix"]), []).append(i)
+        text = (f"🌐 <b>Шаг 3.</b> Выберите подсети\n"
+                f"📍 {hd.quote(data['region_label'])} · подсетей: <b>{len(pools)}</b> · "
+                f"блоков /24: <b>{sum(_blocks(p['prefix']) for p in pools)}</b>\n\n")
+        lines = []
+        for g, idx in groups.items():
+            picked = sum(1 for i in idx if i in selected)
+            lines.append(f"{'✅' if picked else '▫️'} <code>{g}.#.#</code> — {len(idx)} {_plural_subnets(len(idx))}"
+                         + (f", выбрано {picked}" if picked else ""))
+        text += _fit(lines, 3000)
+        text += "\n\n💡 Откройте группу и отметьте подсети с нужной маской — бот купит сервер с IP из любой из них."
+        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else ''}{g}.#.# · {len(idx)}",
+                       callback_data=f"buy:ipg:{g}") for g, idx in list(groups.items())[:80]]
+        rows = grid(buttons, 2)
+        rows.append([Btn(text="✏️ Своя подсеть", callback_data="buy:ip:custom"),
+                     Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
+    else:
+        idx = [i for i, p in enumerate(pools) if _group(p["prefix"]) == group]
+        text = (f"🌐 <b>Подсети {group}.#.#</b> · {len(idx)}\n📍 {hd.quote(data['region_label'])}\n\n"
+                + _fit([f"{'✅' if i in selected else '▫️'} <code>{pools[i]['prefix']}</code> · "
+                        f"{_blocks(pools[i]['prefix'])} бл." for i in idx], 3000))
+        buttons = [Btn(text=f"{'✅ ' if i in selected else ''}{pools[i]['prefix']}", callback_data=f"buy:ipt:{i}")
+                   for i in idx[:80]]
+        rows = grid(buttons, 2)
+        rows.append([Btn(text="☑️ Все в группе", callback_data="buy:ipgall"),
+                     Btn(text="⬅️ К группам", callback_data="buy:ipg:-")])
+    if custom:
+        text += "\n\n✏️ Добавлено вручную: " + ", ".join(f"<code>{show_prefix(c)}</code>" for c in custom)
+    text += f"\n\n☑️ Выбрано: <b>{total}</b>"
+    if total:
+        rows.append([Btn(text=f"➡️ Дальше · выбрано {total}", callback_data="buy:ipok")])
+    rows.append(back(f"buy:acc:{data['account_id']}"))
+    await _send(msg, text, kb(*rows), edit)
+
+
+@router.callback_query(F.data.startswith("buy:ipg:"))
+async def ip_group(cb: CallbackQuery, state: FSMContext):
+    group = cb.data.split(":", 2)[2]
+    await state.update_data(ip_group=None if group == "-" else group)
+    await render_ip_screen(cb.message, state, edit=True)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "buy:ipgall")
+async def ip_group_all(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    idx = {i for i, p in enumerate(data["pools"]) if _group(p["prefix"]) == data.get("ip_group")}
+    selected = set(data.get("selected", []))
+    selected = selected - idx if idx <= selected else selected | idx  # second tap clears the group
+    await state.update_data(selected=sorted(selected))
+    await render_ip_screen(cb.message, state, edit=True)
+    await cb.answer()
 
 
 async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     data = await state.get_data()
+    if _subnet_mode(data["pools"]):
+        return await render_subnet_screen(msg, state, edit)
     pools, selected, custom = data["pools"], set(data.get("selected", [])), data.get("custom", [])
     shown = pools[:MAX_IP_BUTTONS]
     text = (f"🌐 <b>Шаг 3.</b> Какие IP искать?\n"
@@ -258,7 +366,8 @@ async def custom_prefix(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text("✏️ <b>Свой IP</b>\n\nОтправьте начало IP-адреса:\n"
                                "• <code>95.182.87</code> — блок 95.182.87.#\n"
                                "• <code>94.103</code> — любой 94.103.#.#\n"
-                               "• <code>94</code> — любой 94.#.#.#\n\n"
+                               "• <code>94</code> — любой 94.#.#.#\n"
+                               "• <code>142.93.96.0/20</code> — подсеть с маской\n\n"
                                "💡 Можно несколько сразу: <code>95.182.87 94.103.80</code>",
                                reply_markup=kb(back("buy:ipback", "⬅️ Назад к списку")))
     await cb.answer()
@@ -272,6 +381,12 @@ async def ip_back(cb: CallbackQuery, state: FSMContext):
 
 
 def _parse_prefix(raw: str) -> str | None:
+    if "/" in raw:  # a subnet with a mask: 142.93.96.0/20
+        try:
+            net = ipaddress.ip_network(raw.strip(), strict=False)
+            return str(net) if net.version == 4 else None
+        except ValueError:
+            return None
     prefix = raw.strip().rstrip(".#").rstrip(".")
     parts = prefix.split(".")
     if 1 <= len(parts) <= 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
