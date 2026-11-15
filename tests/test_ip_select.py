@@ -88,6 +88,8 @@ async def scenario():
         await dp.feed_update(bot, cb_update(9, "buy:cnt:2"))
         await dp.feed_update(bot, cb_update(10, "buy:fl:0"))
         await dp.feed_update(bot, cb_update(11, "buy:img:0"))
+        assert "Как входить на сервер" in s.texts()[-1]
+        await dp.feed_update(bot, cb_update(111, "buy:auth:pw"))
         confirm = s.texts()[-1]
         print(confirm)
         assert "Ищем IP: <code>94.103.80.#</code>, <code>95.182.84.#</code>, <code>95.182.87.#</code>, " \

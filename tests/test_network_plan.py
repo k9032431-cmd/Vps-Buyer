@@ -157,6 +157,8 @@ async def scenario():
         await dp.feed_update(bot, cb_update(7, "buy:npall"))
         await dp.feed_update(bot, cb_update(8, "buy:np:2"))         # Unlimited Shared 1 Gbps
         await dp.feed_update(bot, cb_update(9, "buy:img:0"))
+        assert "Как входить на сервер" in s.texts()[-1]
+        await dp.feed_update(bot, cb_update(109, "buy:auth:pw"))
         confirm = s.texts()[-1]
         print(confirm)
         assert "📶 Network plan: <b>Unlimited Shared 1 Gbps</b> · €0.99/мес" in confirm
