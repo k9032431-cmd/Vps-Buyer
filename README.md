@@ -42,6 +42,12 @@
 Для серверов, купленных до этого исправления, в карточке сервера есть **«🛠 Восстановить доступ»**:
 добавляет `allow_all` и переустанавливает ту же систему с новым паролем (IP не меняется, диск стирается).
 
+**🔐 Доступ: пароль или SSH-ключ.** После выбора ОС бот спрашивает, как входить на сервер: «🔑 Пароль
+root» или SSH-ключ. Публичный ключ (`ssh-ed25519 …`, `ssh-rsa …`, `ecdsa-…`) добавляется один раз и
+сохраняется для следующих покупок; приватный ключ бот не принимает и сразу удаляет такое сообщение.
+Ключ попадает на сервер скриптом первого запуска (HostVDS, DigitalOcean, Timeweb, Serverspace) или через
+API ключей (Selectel VDS). У Aeza ключ при заказе передать нельзя — там только пароль.
+
 **☁️ Мои серверы** — список купленных серверов. Нажмите на сервер: IP, пароль root и кнопка
 «🗑 Удалить сервер» (удаляет у провайдера, с подтверждением). Есть «🗑 Удалить все».
 
@@ -136,7 +142,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`, `python -m tests.test_ssh_keys`
 
 ## Доступ по приглашению
 

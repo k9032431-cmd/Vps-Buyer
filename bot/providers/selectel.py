@@ -146,20 +146,30 @@ class SelectelVDSClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None) -> Server:
-        password = _password()
+                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+        password = None if ssh_key else _password()
+        key_id = await self._key_id(ssh_key) if ssh_key else None
         async with self._create_lock:  # respect 12 creates per minute
             wait = self._last_create + CREATE_INTERVAL - time.time()
             if wait > 0:
                 await asyncio.sleep(wait)
             self._last_create = time.time()
             data = await self._request("POST", "/scalets", {
-                "make_from": image_id, "rplan": flavor.id, "do_start": True,
-                "name": name, "password": password, "location": region,
+                "make_from": image_id, "rplan": flavor.id, "do_start": True, "name": name, "location": region,
+                **({"keys": [key_id]} if key_id else {"password": password}),
             })
         srv = self._server(data)
         srv.admin_pass = password
         return srv
+
+    async def _key_id(self, public_key: str) -> int:
+        """ID of this public key in the account (uploaded once, then reused)."""
+        body = public_key.split()[1]
+        for k in await self._request("GET", "/sshkeys") or []:
+            if body in str(k.get("key", "")):
+                return k["id"]
+        created = await self._request("POST", "/sshkeys", {"key": public_key, "name": f"vps-buyer-{body[-8:]}"})
+        return created["id"]
 
     async def get_server(self, region: str, server_id: str) -> Server:
         return self._server(await self._request("GET", f"/scalets/{server_id}"))

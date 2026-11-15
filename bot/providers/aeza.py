@@ -206,7 +206,7 @@ class AezaClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
         body = await self._request("POST", "/services/orders", {
             "productId": int(flavor.id), "count": 1, "term": "hour", "name": name,
             "parameters": {"os": int(image_id) if str(image_id).isdigit() else image_id, "recipe": None},

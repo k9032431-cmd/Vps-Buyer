@@ -51,6 +51,8 @@ async def _card(user_id: int, row: db.ServerRow) -> tuple[str, object]:
     text = f"🖥 <b>Сервер {hd.quote(row.name)}</b>\n\n🌐 IP: <code>{row.ip}</code>\n"
     if row.admin_pass:
         text += f"🔑 Пароль root: <code>{hd.quote(row.admin_pass)}</code>\n"
+    else:
+        text += "🗝 Вход по SSH-ключу (пароль не задан)\n"
     text += (f"💻 SSH: <code>ssh root@{row.ip}</code>\n"
              f"📍 Локация: {hd.quote(row.region)}"
              f"{' · ' + PROVIDERS[provider] if provider in PROVIDERS else ''}\n"

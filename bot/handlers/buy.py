@@ -16,8 +16,8 @@ from ..buyer import PurchaseJob, run_purchase
 from ..scanner import ScanJob, run_scan
 from ..config import config
 from .. import os_names
-from ..providers import SCOUT_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
-from ..providers.base import prefix24, subnet_blocks
+from ..providers import SCOUT_PROVIDERS, SSH_KEY_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
+from ..providers.base import normalize_ssh_key, prefix24, subnet_blocks
 from ..providers.hostvds_public import money
 from ..keyboards import PROVIDERS, back, grid, kb
 from .accounts import accounts_view, make_client
@@ -34,6 +34,7 @@ MAX_IP_BUTTONS = 60
 class Buy(StatesGroup):
     custom_prefix = State()
     count = State()
+    ssh_key = State()
     scan_count = State()
 
 
@@ -637,11 +638,109 @@ async def images_back(cb: CallbackQuery, state: FSMContext):
 
 # ---------- 8. confirm ----------
 @router.callback_query(F.data.startswith("buy:img:") | F.data.startswith("buy:imgo:"))
-async def confirm(cb: CallbackQuery, state: FSMContext):
+async def image_selected(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     kind, idx = cb.data.split(":")[1:3]
     image = (data["other_images"] if kind == "imgo" else data["images"])[int(idx)]
-    await state.update_data(image=image)
+    await state.update_data(image=image, ssh_key_id=None)
+    await cb.answer()
+    if data["provider"] in SSH_KEY_PROVIDERS:
+        await show_access(cb.message, state, cb.from_user.id, edit=True)
+    else:
+        await render_confirm(cb.message, state, edit=True)
+
+
+# ---------- 8. access: password or SSH key ----------
+async def show_access(msg: Message, state: FSMContext, user_id: int, edit: bool):
+    keys = await db.list_ssh_keys(user_id)
+    rows = [[Btn(text="🔑 Пароль root", callback_data="buy:auth:pw")]]
+    for key_id, name, _ in keys:
+        rows.append([Btn(text=f"🗝 SSH-ключ «{name[:30]}»", callback_data=f"buy:auth:k:{key_id}"),
+                     Btn(text="🗑", callback_data=f"buy:auth:del:{key_id}")])
+    rows.append([Btn(text="➕ Добавить SSH-ключ", callback_data="buy:auth:add")])
+    rows.append(back("buy", "❌ Отмена"))
+    text = ("🔐 <b>Шаг 8.</b> Как входить на сервер?\n\n"
+            "🔑 <b>Пароль root</b> — бот пришлёт пароль вместе с IP.\n"
+            "🗝 <b>SSH-ключ</b> — на сервер добавится ваш публичный ключ, вход без пароля: "
+            "<code>ssh root@IP</code>.")
+    if keys:
+        text += f"\n\n💾 Сохранено ключей: <b>{len(keys)}</b>"
+    await _send(msg, text, kb(*rows), edit)
+
+
+@router.callback_query(F.data == "buy:auth:pw")
+async def auth_password(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(ssh_key_id=None)
+    await cb.answer()
+    await render_confirm(cb.message, state, edit=True)
+
+
+@router.callback_query(F.data.startswith("buy:auth:k:"))
+async def auth_key(cb: CallbackQuery, state: FSMContext):
+    key = await db.get_ssh_key(cb.from_user.id, int(cb.data.split(":")[3]))
+    if not key:
+        return await cb.answer("Ключ не найден", show_alert=True)
+    await state.update_data(ssh_key_id=key[0])
+    await cb.answer()
+    await render_confirm(cb.message, state, edit=True)
+
+
+@router.callback_query(F.data.startswith("buy:auth:del:"))
+async def auth_delete_key(cb: CallbackQuery, state: FSMContext):
+    await db.delete_ssh_key(cb.from_user.id, int(cb.data.split(":")[3]))
+    await cb.answer("🗑 Ключ удалён")
+    await show_access(cb.message, state, cb.from_user.id, edit=True)
+
+
+@router.callback_query(F.data == "buy:auth:add")
+async def auth_add_key(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(Buy.ssh_key)
+    await cb.message.edit_text(
+        "🗝 <b>Добавить SSH-ключ</b>\n\n"
+        "Отправьте <b>публичный</b> ключ одной строкой — он начинается с <code>ssh-ed25519</code>, "
+        "<code>ssh-rsa</code> или <code>ecdsa-sha2-…</code>.\n\n"
+        "💻 Показать свой ключ: <code>cat ~/.ssh/id_ed25519.pub</code>\n"
+        "🆕 Создать новый: <code>ssh-keygen -t ed25519</code>\n\n"
+        "⛔ Никогда не отправляйте <b>приватный</b> ключ (файл без <code>.pub</code>).",
+        reply_markup=kb(back("buy:auth:back", "⬅️ Назад")))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "buy:auth:back")
+async def auth_back(cb: CallbackQuery, state: FSMContext):
+    await state.set_state(None)
+    await cb.answer()
+    await show_access(cb.message, state, cb.from_user.id, edit=True)
+
+
+@router.message(Buy.ssh_key)
+async def auth_key_text(message: Message, state: FSMContext):
+    text = message.text or ""
+    if "PRIVATE KEY" in text:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer("⛔ <b>Это приватный ключ</b> — сообщение удалено. Отправьте файл с <code>.pub</code> "
+                             "на конце (публичный ключ). Приватный ключ лучше заменить, раз он был отправлен.")
+        return
+    key = normalize_ssh_key(text)
+    if not key:
+        await message.answer("⚠️ Это не похоже на публичный SSH-ключ. Он выглядит так:\n"
+                             "<code>ssh-ed25519 AAAAC3Nza… user@pc</code>")
+        return
+    parts = key.split(" ")
+    name = parts[2] if len(parts) > 2 else f"{parts[0].replace('ssh-', '')} …{parts[1][-6:]}"
+    key_id = await db.add_ssh_key(message.from_user.id, name[:40], key)
+    await state.set_state(None)
+    await state.update_data(ssh_key_id=key_id)
+    await message.answer(f"✅ Ключ «{hd.quote(name[:40])}» сохранён — он будет доступен и в следующих покупках.")
+    await render_confirm(message, state, edit=False)
+
+
+async def render_confirm(msg: Message, state: FSMContext, edit: bool):
+    data = await state.get_data()
+    image = data["image"]
     f = data["flavor"]
     np = data.get("network_plan")
     lines = [
@@ -655,16 +754,19 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
     if np:
         price = f" · {money(np['price'], f.get('currency', 'usd'))}/мес" if np["price"] else " · бесплатно"
         lines.append(f"📶 Network plan: <b>{hd.quote(np['title'])}</b>{price}")
-    lines += [f"💿 ОС: <b>{hd.quote(image['name'])}</b>", f"🔢 Количество: <b>{data['count']}</b>", ""]
+    key = await db.get_ssh_key(msg.chat.id, data["ssh_key_id"]) if data.get("ssh_key_id") else None
+    lines += [f"💿 ОС: <b>{hd.quote(image['name'])}</b>",
+              f"🔐 Доступ: <b>{'SSH-ключ «' + hd.quote(key[1]) + '»' if key else 'пароль root'}</b>",
+              f"🔢 Количество: <b>{data['count']}</b>", ""]
+    if data["provider"] not in SSH_KEY_PROVIDERS:
+        lines.insert(-1, "ℹ️ У этого провайдера ключ при заказе передать нельзя — вход по паролю root.")
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
     lines.append(f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). "
                  "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
     text = "\n".join(lines)
-    await cb.message.edit_text(text, reply_markup=kb(
-        [Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")))
-    await cb.answer()
+    await _send(msg, text, kb([Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")), edit)
 
 
 # ---------- 9. run ----------
@@ -696,8 +798,10 @@ async def send_safe(bot: Bot, chat_id: int, text: str, **kwargs) -> bool:
     return False
 
 
-def server_card(ip: str, password: str | None, name: str = "", label: str = "") -> str:
+def server_card(ip: str, password: str | None, name: str = "", label: str = "", key_name: str = "") -> str:
     lines = [f"🖥 <code>{ip}</code>"]
+    if key_name:
+        lines.append(f"🗝 Вход по SSH-ключу «{hd.quote(key_name)}»")
     if password:
         lines.append(f"🔑 <code>{hd.quote(password)}</code>")
     lines.append(f"💻 <code>ssh root@{ip}</code>")
@@ -726,6 +830,9 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
         max_attempts=config.max_attempts, parallel=config.parallel,
         active_timeout=config.active_timeout, boot_volume_gb=config.boot_volume_gb,
     )
+    key = await db.get_ssh_key(uid, data["ssh_key_id"]) if data.get("ssh_key_id") else None
+    if key and data["provider"] in SSH_KEY_PROVIDERS:
+        job.ssh_key, job.ssh_key_name = key[2], key[1]
     JOBS[uid] = job
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
     await cb.message.edit_text(_progress_text(job, label=data.get("region_label", "")), reply_markup=cancel_kb)
@@ -761,9 +868,10 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
             except Exception:
                 log.exception("saving server %s failed", server.id)
             await send_safe(bot, uid, f"🎉 <b>Нашёлся IP!</b>  ({len(job.kept)}/{job.count})\n\n"
-                            + server_card(server.ipv4[0], server.admin_pass, server.name, label)
-                            + ("\n\n⏱ Пароль начнёт работать примерно через минуту после запуска."
-                               if acc.provider == "hostvds" else ""))
+                            + server_card(server.ipv4[0], server.admin_pass, server.name, label, job.ssh_key_name)
+                            + ("\n\n⏱ Ключ начнёт работать примерно через минуту после запуска." if job.ssh_key
+                               else "\n\n⏱ Пароль начнёт работать примерно через минуту после запуска."
+                               if acc.provider in ("hostvds", "digitalocean") else ""))
 
     job.on_found = found
     try:
@@ -790,7 +898,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
 
     # Final summary always repeats IP + password of every server.
     if job.kept:
-        cards = "\n\n".join(server_card(srv.ipv4[0], srv.admin_pass) for srv in job.kept)
+        cards = "\n\n".join(server_card(srv.ipv4[0], srv.admin_pass, key_name=job.ssh_key_name) for srv in job.kept)
         await send_safe(bot, uid, f"📦 <b>Итого куплено: {len(job.kept)}</b>\n\n{cards}\n\n"
                         "💡 Нажмите на IP или пароль, чтобы скопировать. Всё сохранено в «☁️ Мои серверы».")
     reason = ("⛔ остановлено вами" if job.cancelled else

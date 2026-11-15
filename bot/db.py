@@ -62,6 +62,13 @@ CREATE TABLE IF NOT EXISTS ip_seen (
     ip TEXT NOT NULL,
     PRIMARY KEY (provider, region, ip)
 );
+CREATE TABLE IF NOT EXISTS ssh_keys (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS subnets_seen (
     provider TEXT NOT NULL,
     region TEXT NOT NULL,
@@ -277,3 +284,34 @@ async def subnets(provider: str, region: str) -> list[str]:
         rows = await (await db.execute(
             "SELECT cidr FROM subnets_seen WHERE provider=? AND region=?", (provider, region))).fetchall()
     return [r[0] for r in rows]
+
+
+# ---------- SSH public keys (per user) ----------
+async def add_ssh_key(user_id: int, name: str, public_key: str) -> int:
+    async with aiosqlite.connect(config.db_path) as db:
+        row = await (await db.execute("SELECT id FROM ssh_keys WHERE user_id=? AND public_key=?",
+                                      (user_id, public_key))).fetchone()
+        if row:
+            return row[0]
+        cur = await db.execute("INSERT INTO ssh_keys (user_id, name, public_key) VALUES (?,?,?)",
+                               (user_id, name, public_key))
+        await db.commit()
+        return cur.lastrowid
+
+
+async def list_ssh_keys(user_id: int) -> list[tuple[int, str, str]]:
+    async with aiosqlite.connect(config.db_path) as db:
+        return await (await db.execute("SELECT id, name, public_key FROM ssh_keys WHERE user_id=? ORDER BY id",
+                                       (user_id,))).fetchall()
+
+
+async def get_ssh_key(user_id: int, key_id: int) -> tuple[int, str, str] | None:
+    async with aiosqlite.connect(config.db_path) as db:
+        return await (await db.execute("SELECT id, name, public_key FROM ssh_keys WHERE id=? AND user_id=?",
+                                       (key_id, user_id))).fetchone()
+
+
+async def delete_ssh_key(user_id: int, key_id: int) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute("DELETE FROM ssh_keys WHERE id=? AND user_id=?", (key_id, user_id))
+        await db.commit()

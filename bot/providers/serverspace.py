@@ -12,7 +12,7 @@ import time
 
 import aiohttp
 
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, prefix24, subnet_blocks
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, prefix24, ssh_key_script, subnet_blocks
 
 API_URL = "https://api.serverspace.ru"
 
@@ -191,11 +191,12 @@ class ServerspaceClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
         cpu, ram, disk, bw = (int(x) for x in flavor.id.split("-"))
         res = await self._request("POST", "/api/v1/servers", {
             "location_id": region, "image_id": image_id, "cpu": cpu, "ram_mb": ram,
             "volumes": [{"name": "boot", "size_mb": disk}], "networks": [{"bandwidth_mbps": bw}], "name": name,
+            **({"server_init_script": ssh_key_script(ssh_key)} if ssh_key else {}),
         })
         task = await self._task(res["task_id"])
         if not task.get("server_id"):

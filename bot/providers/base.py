@@ -10,7 +10,10 @@
         await c.wait_active(region, server_id, timeout) -> Server
         await c.delete_server(region, server_id)
 """
+import base64
+import binascii
 import ipaddress
+import shlex
 from dataclasses import dataclass, field
 
 
@@ -100,3 +103,31 @@ class Server:
     ipv4: list[str]
     admin_pass: str | None = None
     cidrs: list[str] = field(default_factory=list)   # public subnets of its IPs, when the provider tells
+
+
+SSH_KEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                 "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com", "ssh-dss")
+
+
+def normalize_ssh_key(text: str) -> str | None:
+    """A single-line OpenSSH public key ("ssh-ed25519 AAAA… comment") or None if it is not one."""
+    parts = " ".join((text or "").split()).split(" ")
+    if len(parts) < 2 or parts[0] not in SSH_KEY_TYPES:
+        return None
+    try:
+        blob = base64.b64decode(parts[1], validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(blob) < 32 or parts[0].split("@")[0].encode() not in blob[:64]:
+        return None
+    return " ".join(parts[:3])
+
+
+def ssh_key_script(public_key: str) -> str:
+    """First-boot script that lets root log in with this key (for user_data / cloud_init style fields)."""
+    return "\n".join([
+        "#!/bin/bash",
+        "mkdir -p /root/.ssh && chmod 700 /root/.ssh",
+        f"printf '%s\\n' {shlex.quote(public_key)} >> /root/.ssh/authorized_keys",
+        "chmod 600 /root/.ssh/authorized_keys",
+    ])

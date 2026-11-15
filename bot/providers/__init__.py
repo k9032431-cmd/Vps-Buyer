@@ -15,6 +15,8 @@ SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace"}
 TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean"}
 # Providers whose full subnet list is known up front (prefixes are CIDRs, chosen by mask).
 SUBNET_PROVIDERS = {"digitalocean"}
+# Providers that can put your SSH public key on a new server (Aeza's order API has no way to pass one).
+SSH_KEY_PROVIDERS = {"hostvds", "selectel", "timeweb", "serverspace", "digitalocean"}
 
 
 def make_client(provider: str, username: str, password: str, project_name: str):
@@ -32,4 +34,4 @@ def make_client(provider: str, username: str, password: str, project_name: str):
     return HostVDSClient(config.hostvds_auth_url, username, password, project_name)
 
 
-__all__ = ["PROVIDERS", "SCOUT_PROVIDERS", "SUBNET_PROVIDERS", "TOKEN_PROVIDERS", "make_client", "Flavor", "Image", "IpPool", "ProviderError", "RegionStatus", "Server"]
+__all__ = ["PROVIDERS", "SCOUT_PROVIDERS", "SUBNET_PROVIDERS", "SSH_KEY_PROVIDERS", "TOKEN_PROVIDERS", "make_client", "Flavor", "Image", "IpPool", "ProviderError", "RegionStatus", "Server"]

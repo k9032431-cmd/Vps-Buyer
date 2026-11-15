@@ -12,7 +12,7 @@ import aiohttp
 from passlib.hash import sha512_crypt
 
 from . import hostvds_public as public
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24, ssh_key_script
 
 COMPUTE_MICROVERSION = "compute 2.47"
 
@@ -311,14 +311,15 @@ class HostVDSClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
         if port_id:
             networks = [{"port": port_id}]
         else:
             networks = [{"uuid": network_id}] if network_id else "auto"
-        password = make_password()
-        server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks,
-                        "user_data": password_user_data(password)}
+        password = None if ssh_key else make_password()
+        user_data = (base64.b64encode(ssh_key_script(ssh_key).encode()).decode() if ssh_key
+                     else password_user_data(password))
+        server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks, "user_data": user_data}
         if not port_id:  # a port already carries its security group
             server["security_groups"] = [{"name": await self.security_group(region)}]
         if metadata:  # e.g. {"network_plan": "unlim-shared-1000"} — how HostVDS picks the network plan

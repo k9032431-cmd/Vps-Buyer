@@ -9,7 +9,7 @@ import time
 
 import aiohttp
 
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, prefix24
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, prefix24, ssh_key_script
 
 API_URL = "https://api.timeweb.cloud"
 
@@ -137,11 +137,12 @@ class TimewebClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None) -> Server:
-        data = await self._request("POST", "/api/v1/servers", {
-            "name": name, "preset_id": int(flavor.id), "os_id": int(image_id),
-            "availability_zone": region, "is_ddos_guard": False,
-        })
+                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+        body = {"name": name, "preset_id": int(flavor.id), "os_id": int(image_id),
+                "availability_zone": region, "is_ddos_guard": False}
+        if ssh_key:
+            body["cloud_init"] = ssh_key_script(ssh_key)
+        data = await self._request("POST", "/api/v1/servers", body)
         return self._server(data["server"])
 
     async def get_server(self, region: str, server_id: str) -> Server:

@@ -68,7 +68,8 @@ def make_app(ips):
                 state["rate_limited"] = True
                 return web.Response(status=429, headers={"Vscale-Error-Message": "too_many_requests"})
             body = await req.json()
-            assert body["password"] and body["do_start"] is True and body["location"] == "spb0", body
+            assert (body.get("password") or body.get("keys")) and body["do_start"] is True, body
+            assert body["location"] == "spb0", body
             ctid = 1000 + len(state["scalets"])
             state["scalets"][ctid] = {"ctid": ctid, "name": body["name"], "location": body["location"],
                                       "status": "defined", "public_address": {}, "polls": 0, "ip": next(ips)}

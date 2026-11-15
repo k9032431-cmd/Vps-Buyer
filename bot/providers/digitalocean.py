@@ -18,7 +18,7 @@ import aiohttp
 from passlib.hash import sha512_crypt
 
 from ..config import config
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, ssh_key_script
 
 API_URL = "https://api.digitalocean.com/v2"
 
@@ -196,11 +196,12 @@ class DigitalOceanClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None) -> Server:
-        password = _password()
+                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+        password = None if ssh_key else _password()
         data = await self._request("POST", "/droplets", {
             "name": name, "region": region, "size": flavor.id, "image": image_id,
-            "user_data": password_script(password), "ipv6": False, "monitoring": False,
+            "user_data": ssh_key_script(ssh_key) if ssh_key else password_script(password),
+            "ipv6": False, "monitoring": False,
             "tags": ["vps-buyer"],
         })
         srv = self._server(data["droplet"])
