@@ -18,6 +18,8 @@ from typing import Awaitable, Callable
 from .providers import Flavor, ProviderError, Server
 
 HELD_PORTS_LIMIT = 200
+MAX_BATCH = 10  # most servers created at once when the provider reports free capacity
+SLOT_WAIT = 180  # seconds to wait for capacity freed by our own deletions
 
 
 # Client errors (bad request, no money, quota, forbidden…) stop the job; 409/429 are transient.
@@ -222,15 +224,39 @@ async def run_purchase(client, job: PurchaseJob,
             return job
 
     job.mode = "servers"
-    while len(job.kept) < job.count and job.attempts < job.max_attempts and not job.cancelled:
+    unlimited = job.max_attempts <= 0
+    while (len(job.kept) < job.count and (unlimited or job.attempts < job.max_attempts)
+           and not job.cancelled):
         need = job.count - len(job.kept)
-        batch = min(need, job.parallel, job.max_attempts - job.attempts)
+        batch = max(need, job.parallel)
+        if hasattr(client, "free_slots"):  # account limit on servers at once (DigitalOcean)
+            slots, limit = await client.free_slots()
+            waited = 0
+            # right after a batch, servers we just deleted may still be counted for a few seconds
+            while slots <= 0 and job.attempts and waited < SLOT_WAIT and not job.cancelled:
+                await asyncio.sleep(10)
+                waited += 10
+                slots, limit = await client.free_slots()
+            if slots <= 0:
+                job.error = (f"Лимит аккаунта: уже {limit - slots} из {limit} серверов. Удалите лишние "
+                             "или попросите провайдера поднять лимит.")
+                job.log.append(f"❗ {html.escape(job.error)}")
+                break
+            batch = min(batch, slots, MAX_BATCH)
+        else:
+            batch = min(need, job.parallel)
+        if not unlimited:
+            batch = min(batch, job.max_attempts - job.attempts)
         job.attempts += batch
         results = await asyncio.gather(*(_try_server(client, job) for _ in range(batch)), return_exceptions=True)
+        busy = False
         for r in results:
             if isinstance(r, BaseException):
                 _note_error(job, r)
+                busy = busy or (isinstance(r, ProviderError) and r.status == 429)
         await on_progress(job)
         if job.error:
             break
+        if busy:  # rate or capacity limit — give the provider a moment instead of hammering it
+            await asyncio.sleep(15)
     return job

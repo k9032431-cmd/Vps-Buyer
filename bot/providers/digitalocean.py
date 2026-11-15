@@ -107,9 +107,12 @@ class DigitalOceanClient:
                 body = await r.json(content_type=None) if r.content_length != 0 else None
                 if r.status >= 400:
                     msg = (body or {}).get("message") if isinstance(body, dict) else None
+                    status = r.status
                     if r.status == 401:
                         msg = f"неверный токен ({msg})"
-                    raise ProviderError(f"DigitalOcean {method} {path} → {r.status}: {msg or r.reason}", r.status)
+                    elif r.status == 422 and "droplet limit" in str(msg).lower():
+                        msg, status = "лимит дроплетов аккаунта занят — жду, пока освободится место", 429
+                    raise ProviderError(f"DigitalOcean {method} {path} → {r.status}: {msg or r.reason}", status)
                 return body
 
     async def _all(self, path: str, key: str, params: dict | None = None) -> list[dict]:
@@ -133,6 +136,14 @@ class DigitalOceanClient:
         if acc.get("status") and acc["status"] != "active":
             text += f" (статус: {acc['status']})"
         return text
+
+    async def free_slots(self) -> tuple[int, int]:
+        """(how many more droplets the account may have right now, the account's droplet limit)."""
+        acc, droplets = await asyncio.gather(self._request("GET", "/account"),
+                                             self._request("GET", "/droplets", params={"per_page": 1}))
+        limit = int(acc["account"].get("droplet_limit") or 0) or 10
+        total = int((droplets.get("meta") or {}).get("total") or len(droplets.get("droplets", [])))
+        return limit - total, limit
 
     # ---------- regions / subnets ----------
     async def region_statuses(self) -> list[RegionStatus]:

@@ -61,14 +61,16 @@ async def profile(cb: CallbackQuery):
 async def info(cb: CallbackQuery):
     text = (
         "ℹ️ <b>Как это работает</b>\n\n"
-        "1️⃣ <b>🔑 Аккаунты</b> — подключите HostVDS (логин и пароль OpenStack) или Selectel VDS (API-токен).\n\n"
+        "1️⃣ <b>🔑 Аккаунты</b> — подключите аккаунт провайдера (HostVDS, Selectel VDS, Timeweb Cloud, Aeza, "
+        "Serverspace, DigitalOcean).\n\n"
         "2️⃣ <b>🛒 Купить сервер</b> — провайдер → аккаунт → локация.\n\n"
         "3️⃣ Отметьте нужные IP-блоки, например <code>95.182.87.#</code>. Можно сразу несколько.\n\n"
         "4️⃣ Укажите количество, тариф, Network plan и ОС.\n\n"
         "5️⃣ Бот подбирает IP и присылает каждый готовый сервер с паролем. Серверы с чужим IP удаляются.\n\n"
         "☁️ <b>Мои серверы</b> — пароли, удаление и «🛠 Восстановить доступ».\n\n"
         f"💸 Каждое создание сервера может стоить денег (почасовая оплата). "
-        f"Лимит попыток: <b>{config.max_attempts}</b>."
+        + (f"Лимит попыток: <b>{config.max_attempts}</b>." if config.max_attempts > 0
+           else "Лимита попыток нет — покупку можно остановить кнопкой ⛔.")
     )
     await cb.message.edit_text(text, reply_markup=kb(back("menu", "🏠 Главное меню")))
     await cb.answer()

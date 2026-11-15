@@ -36,7 +36,10 @@ GEOFEED = """# DigitalOcean geofeed
 
 def make_app(ips):
     ips = itertools.cycle(ips)
-    st = {"droplets": {}, "deleted": [], "created": []}
+    st = {"droplets": {}, "deleted": [], "created": [], "limit": 3, "others": 0, "max_alive": 0, "limit_errors": 0}
+
+    def alive():
+        return st["others"] + len([d for d in st["droplets"] if d not in st["deleted"]])
     app = web.Application()
     app.router.add_get("/geo/google.csv", lambda r: web.Response(text=GEOFEED))
 
@@ -46,7 +49,8 @@ def make_app(ips):
             return web.json_response({"id": "unauthorized", "message": "Unable to authenticate you"}, status=401)
         return await handler(req)
     app.middlewares.append(auth)
-    app.router.add_get("/v2/account", lambda r: web.json_response({"account": {"email": "me@example.com", "status": "active"}}))
+    app.router.add_get("/v2/account", lambda r: web.json_response(
+        {"account": {"email": "me@example.com", "status": "active", "droplet_limit": st["limit"]}}))
     app.router.add_get("/v2/customers/my/balance", lambda r: web.json_response({"account_balance": "-25.50"}))
     app.router.add_get("/v2/regions", lambda r: web.json_response({"regions": [
         {"slug": "fra1", "name": "Frankfurt 1", "available": True, "sizes": ["s-1vcpu-1gb"]},
@@ -74,11 +78,18 @@ def make_app(ips):
         return {"id": did, "name": d["name"], "status": "active" if ready else "new", "networks": {"v4": v4}}
 
     async def droplets(req):
+        if req.method == "GET":
+            return web.json_response({"droplets": [], "meta": {"total": alive()}})
+        if alive() >= st["limit"]:
+            st["limit_errors"] += 1
+            return web.json_response({"id": "unprocessable_entity",
+                                      "message": "creating this/these droplet(s) will exceed your droplet limit"}, status=422)
         b = await req.json()
         st["created"].append(b)
         did = 9000 + len(st["droplets"])
         ip, mask = next(ips)
         st["droplets"][did] = {"name": b["name"], "polls": 0, "ip": ip, "mask": mask}
+        st["max_alive"] = max(st["max_alive"], alive())
         return web.json_response({"droplet": {"id": did, "name": b["name"], "status": "new", "networks": {"v4": []}}},
                                  status=202)
 
@@ -88,7 +99,7 @@ def make_app(ips):
             st["deleted"].append(did)
             return web.Response(status=204)
         return web.json_response({"droplet": droplet(did)})
-    app.router.add_post("/v2/droplets", droplets)
+    app.router.add_route("*", "/v2/droplets", droplets)
     app.router.add_route("*", "/v2/droplets/{id}", one)
     return app, st
 
@@ -185,6 +196,45 @@ async def scenario():
         assert (b["region"], b["size"], b["image"]) == ("fra1", "s-1vcpu-1gb", "ubuntu-24-04-x64")
         assert "chpasswd --encrypted" in b["user_data"] and "chage -d" in b["user_data"]
         assert job.subnets[:2] == ["164.92.160.0/20", "142.93.96.0/20"], job.subnets
+
+        # ---------- no attempt limit; batches never exceed the account's droplet limit ----------
+        app2, st2 = make_app([("1.2.3.4", "255.255.255.0")] * 7 + [("142.93.99.1", "255.255.240.0")])
+        srv2 = TestServer(app2)
+        await srv2.start_server()
+        try:
+            async with DigitalOceanClient(TOKEN, str(srv2.make_url("/v2"))) as c:
+                job = PurchaseJob("fra1", buy.Flavor(**data["flavor"]), "ubuntu-24-04-x64", None, ["142.93.96.0/20"],
+                                  1, max_attempts=0, parallel=3, active_timeout=30, boot_volume_gb=10)
+                await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+                assert [k.ipv4[0] for k in job.kept] == ["142.93.99.1"] and not job.error, job.log
+                assert job.attempts >= 8, "the old 50-attempt cap is gone and 8 droplets were needed"
+                assert st2["max_alive"] <= 3, "never more droplets at once than the account allows"
+                assert st2["limit_errors"] == 0, "batches are sized to the free slots"
+                # account already full with other droplets → a clear message, nothing created
+                st2["others"], before = 2, len(st2["created"])  # + the droplet bought above = 3
+                job2 = PurchaseJob("fra1", buy.Flavor(**data["flavor"]), "ubuntu-24-04-x64", None, ["142.93.96.0/20"],
+                                   1, max_attempts=0, parallel=3, active_timeout=30, boot_volume_gb=10)
+                await run_purchase(c, job2, lambda j: ORIG_SLEEP(0))
+                assert job2.error and "уже 3 из 3" in job2.error and len(st2["created"]) == before
+        finally:
+            await srv2.close()
+
+        # ---------- ⭐ subnets this datacenter really handed out come first ----------
+        await db.add_seen_ips("digitalocean", "fra1", ["164.92.170.5", "164.92.171.9", "107.170.11.229"])
+        await db.add_subnets("digitalocean", "fra1", ["107.170.0.0/17"])
+        await ctx.set_data({"provider": "digitalocean", "account_id": acc, "regions": ["fra1"],
+                            "region_labels": {"fra1": "🇩🇪 Франкфурт · fra1"}})
+        await dp.feed_update(bot, cb_update(20, "buy:reg:0"))
+        groups = s.texts()[-1]
+        print("\n" + groups)
+        lines = [l for l in groups.splitlines() if "<code>" in l]
+        assert lines[0].startswith("⭐ <code>164.92.#.#</code>") and "выпадало 2" in lines[0], lines
+        assert "⭐ <code>107.170.#.#</code>" in groups, "subnet seen here but missing from the geofeed is added"
+        assert "⭐ Выбрать выпадавшие" in markup_texts(s)
+        await dp.feed_update(bot, cb_update(21, "buy:iphits"))
+        picked = [p["prefix"] for i, p in enumerate((await ctx.get_data())["pools"])
+                  if i in (await ctx.get_data())["selected"]]
+        assert picked == ["107.170.0.0/17", "164.92.160.0/20"], picked
     finally:
         await srv.close()
         digitalocean.asyncio.sleep = ORIG_SLEEP

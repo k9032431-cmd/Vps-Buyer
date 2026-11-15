@@ -48,6 +48,7 @@ class IpPool:
     cidrs: list[str]                 # source subnets (or example IPs when learned from servers)
     subnet_id: str | None = None     # allocate straight from this subnet when the provider allows it
     free: int | None = None          # free IPv4 addresses in its network, when the provider tells us
+    hits: int = 0                    # how many IPs from it this datacenter already handed out to us
 
 
 def prefix24(ip: str) -> str:

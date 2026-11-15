@@ -154,7 +154,10 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     except Exception as e:
         log.warning("ip_pools failed: %s", e)
         pools = []
-    if data["provider"] not in SUBNET_PROVIDERS:  # full subnet list from the provider needs no guessing
+    if data["provider"] in SUBNET_PROVIDERS:
+        pools = _mark_hits(pools, await db.seen_ips(data["provider"], region),
+                           await db.subnets(data["provider"], region))
+    else:
         pools = _merge_seen(pools, await db.seen_ips(data["provider"], region),
                             await db.subnets(data["provider"], region))
     full = [p for p in pools if p.free == 0]          # provider says: no free addresses there
@@ -162,6 +165,24 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full),
                             ip_group=None)
     await render_ip_screen(cb.message, state, edit=True)
+
+
+def _mark_hits(pools: list[IpPool], seen: list[str], subnets: list[str]) -> list[IpPool]:
+    """Full subnet lists (geofeeds) cover a whole city: mark the subnets this very datacenter has
+    actually handed out (from earlier purchases / scouting) and add ones missing from the list."""
+    nets = [ipaddress.ip_network(p.prefix, strict=False) for p in pools]
+    for cidr in subnets:
+        net = ipaddress.ip_network(cidr, strict=False)
+        if not any(net.subnet_of(n) for n in nets if n.version == net.version):
+            pools.append(IpPool(str(net), None, [str(net)]))
+            nets.append(net)
+    for ip in seen:
+        addr = ipaddress.ip_address(ip)
+        for p, n in zip(pools, nets):
+            if addr in n:
+                p.hits += 1
+                break
+    return sorted(pools, key=lambda p: ipaddress.ip_network(p.prefix, strict=False))
 
 
 def _subnet_mode(pools: list[dict]) -> bool:
@@ -178,6 +199,10 @@ def _fit(lines: list[str], budget: int) -> str:
         out.append(line)
         used += len(line) + 1
     return "\n".join(out)
+
+
+def _attempts_text() -> str:
+    return f"максимум {config.max_attempts} созданий" if config.max_attempts > 0 else "без лимита попыток"
 
 
 def _plural_subnets(n: int) -> str:
@@ -214,28 +239,38 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
         groups: dict[str, list[int]] = {}
         for i, p in enumerate(pools):
             groups.setdefault(_group(p["prefix"]), []).append(i)
+        hits = {g: sum(pools[i].get("hits", 0) for i in idx) for g, idx in groups.items()}
+        groups = dict(sorted(groups.items(), key=lambda kv: -hits[kv[0]]))  # ⭐ issued here first
         text = (f"🌐 <b>Шаг 3.</b> Выберите подсети\n"
                 f"📍 {hd.quote(data['region_label'])} · подсетей: <b>{len(pools)}</b> · "
                 f"блоков /24: <b>{sum(_blocks(p['prefix']) for p in pools)}</b>\n\n")
         lines = []
         for g, idx in groups.items():
             picked = sum(1 for i in idx if i in selected)
-            lines.append(f"{'✅' if picked else '▫️'} <code>{g}.#.#</code> — {len(idx)} {_plural_subnets(len(idx))}"
+            lines.append(f"{'✅' if picked else '⭐' if hits[g] else '▫️'} <code>{g}.#.#</code> — "
+                         f"{len(idx)} {_plural_subnets(len(idx))}"
+                         + (f", выпадало {hits[g]}" if hits[g] else "")
                          + (f", выбрано {picked}" if picked else ""))
         text += _fit(lines, 3000)
         text += "\n\n💡 Откройте группу и отметьте подсети с нужной маской — бот купит сервер с IP из любой из них."
-        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else ''}{g}.#.# · {len(idx)}",
+        if any(hits.values()):
+            text += ("\n⭐ — подсети, которые <b>этот дата-центр</b> уже выдавал вам. Список провайдера общий на "
+                     "город, поэтому надёжнее выбирать ⭐.")
+        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else '⭐ ' if hits[g] else ''}{g}.#.# · {len(idx)}",
                        callback_data=f"buy:ipg:{g}") for g, idx in list(groups.items())[:80]]
         rows = grid(buttons, 2)
+        if any(hits.values()):
+            rows.append([Btn(text="⭐ Выбрать выпадавшие", callback_data="buy:iphits")])
         rows.append([Btn(text="✏️ Своя подсеть", callback_data="buy:ip:custom"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
     else:
         idx = [i for i, p in enumerate(pools) if _group(p["prefix"]) == group]
         text = (f"🌐 <b>Подсети {group}.#.#</b> · {len(idx)}\n📍 {hd.quote(data['region_label'])}\n\n"
-                + _fit([f"{'✅' if i in selected else '▫️'} <code>{pools[i]['prefix']}</code> · "
-                        f"{_blocks(pools[i]['prefix'])} бл." for i in idx], 3000))
-        buttons = [Btn(text=f"{'✅ ' if i in selected else ''}{pools[i]['prefix']}", callback_data=f"buy:ipt:{i}")
-                   for i in idx[:80]]
+                + _fit([f"{'✅' if i in selected else '⭐' if pools[i].get('hits') else '▫️'} "
+                        f"<code>{pools[i]['prefix']}</code> · {_blocks(pools[i]['prefix'])} бл."
+                        + (f" · выпадало {pools[i]['hits']}" if pools[i].get("hits") else "") for i in idx], 3000))
+        buttons = [Btn(text=f"{'✅ ' if i in selected else '⭐ ' if pools[i].get('hits') else ''}{pools[i]['prefix']}",
+                       callback_data=f"buy:ipt:{i}") for i in idx[:80]]
         rows = grid(buttons, 2)
         rows.append([Btn(text="☑️ Все в группе", callback_data="buy:ipgall"),
                      Btn(text="⬅️ К группам", callback_data="buy:ipg:-")])
@@ -254,6 +289,15 @@ async def ip_group(cb: CallbackQuery, state: FSMContext):
     await state.update_data(ip_group=None if group == "-" else group)
     await render_ip_screen(cb.message, state, edit=True)
     await cb.answer()
+
+
+@router.callback_query(F.data == "buy:iphits")
+async def ip_select_hits(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("selected", [])) | {i for i, p in enumerate(data["pools"]) if p.get("hits")}
+    await state.update_data(selected=sorted(selected))
+    await render_ip_screen(cb.message, state, edit=True)
+    await cb.answer("⭐ Отмечены подсети, которые выпадали в этом дата-центре")
 
 
 @router.callback_query(F.data == "buy:ipgall")
@@ -615,8 +659,8 @@ async def confirm(cb: CallbackQuery, state: FSMContext):
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
-    lines.append(f"💸 Если быстрый режим недоступен, серверы с чужим IP удаляются сразу "
-                 f"(максимум {config.max_attempts} созданий). Каждое создание может стоить денег.")
+    lines.append(f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). "
+                 "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
     text = "\n".join(lines)
     await cb.message.edit_text(text, reply_markup=kb(
         [Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")))

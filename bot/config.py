@@ -29,7 +29,9 @@ class Config:
     do_api_url: str = os.getenv("DO_API_URL", "https://api.digitalocean.com/v2")
     do_geofeed_url: str = os.getenv("DO_GEOFEED_URL", "https://www.digitalocean.com/geo/google.csv")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
-    max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "50"))
+    # 0 = no limit (stop with the ⛔ button).
+    # (old MAX_ATTEMPTS from earlier installs is ignored on purpose — it defaulted to 50)
+    max_attempts: int = int(os.getenv("PURCHASE_ATTEMPT_LIMIT", "0"))
     # Fast mode (HostVDS): max free port checks per job and how many at once.
     max_port_attempts: int = int(os.getenv("MAX_PORT_ATTEMPTS", "500"))
     port_parallel: int = int(os.getenv("PORT_PARALLEL", "10"))
