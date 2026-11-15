@@ -17,7 +17,7 @@ object.__setattr__(config, "hostvds_public_api", "http://127.0.0.1:9")
 from bot import db  # noqa: E402
 from bot.buyer import PurchaseJob, run_purchase  # noqa: E402
 from bot.handlers import access, accounts, buy, menu, servers, update  # noqa: E402
-from bot.providers import ProviderError, digitalocean  # noqa: E402
+from bot.providers import Flavor, ProviderError, digitalocean  # noqa: E402
 from bot.providers.digitalocean import DigitalOceanClient  # noqa: E402
 from tests.test_servers_update import UID, FakeSession, cb_update  # noqa: E402
 
@@ -213,6 +213,8 @@ async def scenario():
                 assert st2["max_alive"] <= 3, "never more droplets at once than the account allows"
                 assert st2["limit_errors"] == 0, "batches are sized to the free slots"
                 # account already full with other droplets → a clear message, nothing created
+                import bot.buyer as buyer_mod
+                buyer_mod.START_SLOT_WAIT = 0
                 st2["others"], before = 2, len(st2["created"])  # + the droplet bought above = 3
                 job2 = PurchaseJob("fra1", buy.Flavor(**data["flavor"]), "ubuntu-24-04-x64", None, ["142.93.96.0/20"],
                                    1, max_attempts=0, parallel=3, active_timeout=30, boot_volume_gb=10)
@@ -242,10 +244,64 @@ async def scenario():
         digitalocean.asyncio.sleep = ORIG_SLEEP
 
 
+async def stale_scenario():
+    """Old subnets that the datacenter no longer hands out: warning before buying, hint while buying."""
+    object.__setattr__(config, "db_path", tempfile.mkdtemp() + "/t.db")
+    object.__setattr__(config, "admin_ids", {UID})
+    await db.init_db()
+    digitalocean.asyncio.sleep = lambda s: ORIG_SLEEP(0)
+    digitalocean._GEOFEED = None
+    app, st = make_app([("164.92.170.5", "255.255.240.0")])
+    st["limit"] = 100
+    srv = TestServer(app)
+    await srv.start_server()
+    object.__setattr__(config, "do_api_url", str(srv.make_url("/v2")))
+    object.__setattr__(config, "do_geofeed_url", str(srv.make_url("/geo/google.csv")))
+    try:
+        await db.add_seen_ips("digitalocean", "fra1", ["164.92.170.5"])
+        acc = await db.add_account(UID, "digitalocean", "me", TOKEN, "")
+        s = FakeSession()
+        bot = Bot("1:x", session=s)
+        dp = Dispatcher()
+        for r in (access.router, menu.router, accounts.router, servers.router, buy.router, update.router):
+            r._parent_router = None  # routers are module singletons; the first scenario attached them
+        dp.include_routers(access.router, menu.router, accounts.router, servers.router, buy.router, update.router)
+        ctx = dp.fsm.get_context(bot, UID, UID)
+        await ctx.set_data({"provider": "digitalocean", "account_id": acc, "regions": ["fra1"],
+                            "region_labels": {"fra1": "🇩🇪 Франкфурт · fra1"}})
+        await dp.feed_update(bot, cb_update(1, "buy:reg:0"))
+        pools = (await ctx.get_data())["pools"]
+        old = next(i for i, p in enumerate(pools) if p["prefix"] == "46.101.128.0/17")
+        await dp.feed_update(bot, cb_update(2, f"buy:ipt:{old}"))
+        await dp.feed_update(bot, cb_update(3, "buy:ipok"))
+        await dp.feed_update(bot, cb_update(4, "buy:cnt:1"))
+        await dp.feed_update(bot, cb_update(5, "buy:fl:0"))
+        await dp.feed_update(bot, cb_update(6, "buy:img:0"))
+        await dp.feed_update(bot, cb_update(7, "buy:auth:pw"))
+        assert "Ни одна из выбранных подсетей ещё не выпадала" in s.texts()[-1], s.texts()[-1]
+        # picking a ⭐ subnet → no warning
+        await ctx.update_data(prefixes=["164.92.160.0/20"])
+        await dp.feed_update(bot, cb_update(8, "buy:auth:pw"))
+        assert "Ни одна из выбранных" not in s.texts()[-1]
+
+        async with DigitalOceanClient(TOKEN, config.do_api_url) as c:
+            job = PurchaseJob("fra1", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64", None,
+                              ["46.101.128.0/17"], 1, max_attempts=33, parallel=3, active_timeout=30,
+                              boot_volume_gb=10)
+            await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+        hints = [l for l in job.log if l.startswith("💡 За")]
+        assert len(hints) == 1 and job.attempts == 33 and not job.kept, (job.attempts, hints)
+    finally:
+        await srv.close()
+        digitalocean.asyncio.sleep = ORIG_SLEEP
+
+
 def test_digitalocean():
     asyncio.run(scenario())
+    asyncio.run(stale_scenario())
 
 
 if __name__ == "__main__":
     test_digitalocean()
     print("OK")
+

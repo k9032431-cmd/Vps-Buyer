@@ -20,6 +20,8 @@ from .providers import Flavor, ProviderError, Server
 HELD_PORTS_LIMIT = 200
 MAX_BATCH = 10  # most servers created at once when the provider reports free capacity
 SLOT_WAIT = 180  # seconds to wait for capacity freed by our own deletions
+START_SLOT_WAIT = 60  # same, before the first batch
+NO_MATCH_HINT = 30  # attempts without a single match before the bot suggests other subnets
 
 
 # Client errors (bad request, no money, quota, forbidden…) stop the job; 409/429 are transient.
@@ -44,6 +46,7 @@ class PurchaseJob:
     metadata: dict = field(default_factory=dict)                  # server metadata (HostVDS network plan…)
     ssh_key: str | None = None                                    # log in with this public key instead of a password
     ssh_key_name: str = ""
+    hinted: bool = False
     max_port_attempts: int = 500
     port_parallel: int = 10
     kept: list[Server] = field(default_factory=list)
@@ -236,7 +239,8 @@ async def run_purchase(client, job: PurchaseJob,
             slots, limit = await client.free_slots()
             waited = 0
             # right after a batch, servers we just deleted may still be counted for a few seconds
-            while slots <= 0 and job.attempts and waited < SLOT_WAIT and not job.cancelled:
+            # (also at the start: a previous purchase may still be deleting its droplets)
+            while slots <= 0 and waited < (SLOT_WAIT if job.attempts else START_SLOT_WAIT) and not job.cancelled:
                 await asyncio.sleep(10)
                 waited += 10
                 slots, limit = await client.free_slots()
@@ -257,6 +261,12 @@ async def run_purchase(client, job: PurchaseJob,
             if isinstance(r, BaseException):
                 _note_error(job, r)
                 busy = busy or (isinstance(r, ProviderError) and r.status == 429)
+        if (not job.kept and not job.hinted and job.attempts >= NO_MATCH_HINT
+                and not any(ip_matches(ip, job.prefixes) for ip in job.seen)):
+            job.hinted = True
+            job.log.append(f"💡 За {job.attempts} попыток ни одного IP из выбранных подсетей — похоже, этот "
+                           "дата-центр их сейчас не выдаёт. Остановите покупку и выберите подсети с ⭐ "
+                           "(те, что здесь реально выпадают).")
         await on_progress(job)
         if job.error:
             break

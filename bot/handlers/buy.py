@@ -760,6 +760,13 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
               f"🔢 Количество: <b>{data['count']}</b>", ""]
     if data["provider"] not in SSH_KEY_PROVIDERS:
         lines.insert(-1, "ℹ️ У этого провайдера ключ при заказе передать нельзя — вход по паролю root.")
+    pools = data.get("pools") or []
+    if _subnet_mode(pools) and any(p.get("hits") for p in pools):
+        chosen = set(data.get("prefixes") or [])
+        if not any(p.get("hits") for p in pools if p["prefix"] in chosen):
+            lines.append("⚠️ <b>Ни одна из выбранных подсетей ещё не выпадала в этом дата-центре.</b> Старые "
+                         "диапазоны провайдер новым серверам почти не выдаёт — подбор может не закончиться. "
+                         "Надёжнее вернуться и выбрать подсети с ⭐.\n")
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
