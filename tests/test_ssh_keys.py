@@ -116,7 +116,19 @@ async def scenario():
 async def providers_scenario():
     # DigitalOcean: key goes into user_data, no password is set
     digitalocean.asyncio.sleep = lambda x: ORIG_SLEEP(0)
-    app, st = do_t.make_app([("142.93.99.1", "255.255.240.0")])
+    app, st = do_t.make_app([("142.93.99.1", "255.255.240.0")] * 3)
+    do_keys = {"list": [], "posts": 0, "fail_post": False}
+
+    async def account_keys(req):
+        if req.method == "POST":
+            do_keys["posts"] += 1
+            if do_keys["fail_post"]:
+                return web.json_response({"id": "forbidden", "message": "no scope"}, status=403)
+            b = await req.json()
+            do_keys["list"].append({"id": 501, "name": b["name"], "public_key": b["public_key"]})
+            return web.json_response({"ssh_key": do_keys["list"][-1]}, status=201)
+        return web.json_response({"ssh_keys": do_keys["list"], "links": {}})
+    app.router.add_route("*", "/v2/account/keys", account_keys)
     srv = TestServer(app)
     await srv.start_server()
     try:
@@ -127,7 +139,21 @@ async def providers_scenario():
             await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
         ud = st["created"][0]["user_data"]
         assert PUB in ud and "/root/.ssh/authorized_keys" in ud and "chpasswd" not in ud
+        assert 'chage -d "$(date +%F)" root' in ud, "lifts DigitalOcean's forced password change"
+        assert st["created"][0]["ssh_keys"] == [501], "key passed through the API → DO sets no password"
         assert job.kept[0].admin_pass is None
+        # a new client (next purchase): the key already in the account is found, not uploaded again
+        async with DigitalOceanClient(do_t.TOKEN, str(srv.make_url("/v2"))) as c:
+            await c.create_server("fra1", "n2", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64",
+                                  None, 10, ssh_key=PUB)
+        assert do_keys["posts"] == 1 and st["created"][1]["ssh_keys"] == [501]
+        # uploading is refused (token scope) → still buys, key via script, expiry lifted
+        do_keys["list"].clear()
+        do_keys["fail_post"] = True
+        async with DigitalOceanClient(do_t.TOKEN, str(srv.make_url("/v2"))) as c:
+            await c.create_server("fra1", "n3", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64",
+                                  None, 10, ssh_key=PUB)
+        assert "ssh_keys" not in st["created"][2] and "chage -d" in st["created"][2]["user_data"]
     finally:
         await srv.close()
         digitalocean.asyncio.sleep = ORIG_SLEEP

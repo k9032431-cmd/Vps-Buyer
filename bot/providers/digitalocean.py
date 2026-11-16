@@ -80,11 +80,17 @@ def password_script(password: str) -> str:
     ])
 
 
+def key_script(public_key: str) -> str:
+    """Add the key for root and lift DigitalOcean's "change your password at first login" (belt and braces)."""
+    return ssh_key_script(public_key) + '\nchage -d "$(date +%F)" root 2>/dev/null || true'
+
+
 class DigitalOceanClient:
     def __init__(self, token: str, api_url: str = API_URL):
         self.token = token.strip()
         self.api_url = api_url.rstrip("/")
         self._session: aiohttp.ClientSession | None = None
+        self._keys: dict[str, int] = {}
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
@@ -198,15 +204,47 @@ class DigitalOceanClient:
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
                             metadata: dict | None = None, ssh_key: str | None = None) -> Server:
         password = None if ssh_key else _password()
-        data = await self._request("POST", "/droplets", {
-            "name": name, "region": region, "size": flavor.id, "image": image_id,
-            "user_data": ssh_key_script(ssh_key) if ssh_key else password_script(password),
-            "ipv6": False, "monitoring": False,
-            "tags": ["vps-buyer"],
-        })
+        body = {"name": name, "region": region, "size": flavor.id, "image": image_id,
+                "user_data": key_script(ssh_key) if ssh_key else password_script(password),
+                "ipv6": False, "monitoring": False, "tags": ["vps-buyer"]}
+        if ssh_key:
+            # Without a key in the API, DigitalOcean sets an EXPIRED root password, and even a key login
+            # then stops at "Current password:". With ssh_keys it sets no password at all.
+            key_id = await self._key_id(ssh_key)
+            if key_id:
+                body["ssh_keys"] = [key_id]
+        data = await self._request("POST", "/droplets", body)
         srv = self._server(data["droplet"])
         srv.admin_pass = password
         return srv
+
+    async def _key_id(self, public_key: str) -> int | None:
+        """ID of this public key in the DigitalOcean account (uploaded once, then reused)."""
+        if public_key in self._keys:
+            return self._keys[public_key]
+        body = public_key.split()[1]
+
+        async def find() -> int | None:
+            for k in await self._all("/account/keys", "ssh_keys"):
+                if body in str(k.get("public_key", "")):
+                    self._keys[public_key] = k["id"]
+                    return k["id"]
+            return None
+        try:
+            if (found := await find()) is not None:
+                return found
+            parts = public_key.split()
+            name = f"vps-buyer {parts[2] if len(parts) > 2 else body[-8:]}"
+            created = await self._request("POST", "/account/keys", {"name": name, "public_key": public_key})
+            self._keys[public_key] = created["ssh_key"]["id"]
+            return self._keys[public_key]
+        except ProviderError as e:
+            if e.status == 422:  # "already in use" under another name — look it up once more
+                try:
+                    return await find()
+                except ProviderError:
+                    pass
+            return None  # the user_data script still installs the key and lifts the expiry
 
     async def get_server(self, region: str, server_id: str) -> Server:
         return self._server((await self._request("GET", f"/droplets/{server_id}"))["droplet"])
