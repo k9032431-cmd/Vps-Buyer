@@ -16,7 +16,7 @@ from ..buyer import PurchaseJob, run_purchase
 from ..scanner import ScanJob, run_scan
 from ..config import config
 from .. import os_names, sshkey
-from ..providers import SCOUT_PROVIDERS, SSH_KEY_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
+from ..providers import PROVIDER_NAMES, RESERVE_PROVIDERS, SCOUT_PROVIDERS, SSH_KEY_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
 from ..providers.base import normalize_ssh_key, prefix24, subnet_blocks
 from ..providers.hostvds_public import money
 from ..keyboards import PROVIDERS, back, grid, kb
@@ -84,6 +84,8 @@ async def choose_provider(cb: CallbackQuery, state: FSMContext):
 @router.callback_query(F.data.startswith("buy:prov:"))
 async def choose_account(cb: CallbackQuery, state: FSMContext):
     provider = cb.data.split(":")[2]
+    if provider not in PROVIDERS:  # a button of a provider that is no longer offered
+        return await choose_provider(cb, state)
     await state.update_data(provider=provider)
     text, markup = await accounts_view(cb.from_user.id, provider, select_prefix="buy:acc:")
     await cb.message.edit_text(text, reply_markup=markup)
@@ -312,6 +314,8 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
         if any(hits.values()):
             rows.append([Btn(text="⭐ Выбрать выпадавшие", callback_data="buy:iphits")])
         rows.append([Btn(text="🌐 Любой IP", callback_data="buy:ipany")])
+        if data.get("provider") in SCOUT_PROVIDERS:
+            rows.append([Btn(text="🔍 Разведать доступные IP", callback_data="buy:scan")])
         rows.append([Btn(text="✏️ Своя подсеть", callback_data="buy:ip:custom"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
     else:
@@ -323,6 +327,9 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
         buttons = [Btn(text=f"{'✅ ' if i in selected else '⭐ ' if pools[i].get('hits') else ''}{pools[i]['prefix']}",
                        callback_data=f"buy:ipt:{i}") for i in idx[:80]]
         rows = grid(buttons, 2)
+        if len(idx) > len(buttons):
+            text += (f"\n\n💡 Кнопками показаны {len(buttons)} из {len(idx)} — отметьте всю группу кнопкой "
+                     "«☑️ Все в группе» или впишите нужную подсеть через «✏️ Своя подсеть».")
         rows.append([Btn(text="☑️ Все в группе", callback_data="buy:ipgall"),
                      Btn(text="⬅️ К группам", callback_data="buy:ipg:-")])
     if custom:
@@ -800,7 +807,7 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
     np = data.get("network_plan")
     lines = [
         "🧾 <b>Проверьте заказ</b>\n",
-        f"☁️ Провайдер: <b>{PROVIDERS[data['provider']]}</b>",
+        f"☁️ Провайдер: <b>{PROVIDER_NAMES[data['provider']]}</b>",
         f"📍 Локация: <b>{hd.quote(data['region_label'])}</b>",
         f"🎯 Ищем IP: {_wanted(data['prefixes'])}",
         f"⚙️ Тариф: <b>{hd.quote(f['name'])}</b> · {f['vcpus']} vCPU · {f['ram_mb'] / 1024:g} GB"
@@ -1005,6 +1012,8 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     await cb.message.edit_text("⏳ Считаю стоимость разведки…")
     await cb.answer()
+    if data["provider"] in RESERVE_PROVIDERS:
+        return await _scan_offer_ips(cb, state, data)
     try:
         async with await _client_for(cb, state) as client:
             flavor, hour = await client.cheapest_plan(data["region"])
@@ -1024,7 +1033,7 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         "🔍 <b>Разведка IP</b>\n"
         f"📍 {hd.quote(data['region_label'])}\n\n"
-        f"У {PROVIDERS[data['provider']]} нет списка подсетей, поэтому бот один раз проверит их сам:\n"
+        f"У {PROVIDER_NAMES[data['provider']]} нет списка подсетей, поэтому бот один раз проверит их сам:\n"
         "1️⃣ создаст самый дешёвый сервер\n"
         "2️⃣ запишет, какой IP он получил\n"
         "3️⃣ сразу удалит сервер и перейдёт к следующему\n"
@@ -1032,6 +1041,25 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
         f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} {cur}/час\n"
         "💸 Оплата почасовая — каждый пробный сервер обходится примерно в час тарифа.\n\n"
         "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP.",
+        reply_markup=kb(*rows))
+
+
+async def _scan_offer_ips(cb: CallbackQuery, state: FSMContext, data: dict):
+    """Hetzner / Vultr: scouting reserves standalone IPs only — no servers, almost free."""
+    stub = Flavor("-", "-", 0, 0, 0)
+    await state.update_data(scan={"flavor": asdict(stub), "image_id": "-", "hour": 0})
+    rows = [[Btn(text=f"🔍 {n} IP", callback_data=f"buy:scango:{n}")] for n in (20, 50, 100)]
+    rows.append([Btn(text=f"✏️ Своё число (до {config.scan_max})", callback_data="buy:scannum")])
+    rows.append(back("buy:ipback", "⬅️ Назад к выбору IP"))
+    await cb.message.edit_text(
+        "🔍 <b>Разведка IP</b>\n"
+        f"📍 {hd.quote(data['region_label'])}\n\n"
+        f"У {PROVIDER_NAMES[data['provider']]} можно взять IP без сервера, поэтому разведка почти бесплатная:\n"
+        "1️⃣ бот резервирует IP\n"
+        "2️⃣ записывает адрес\n"
+        "3️⃣ сразу освобождает его и берёт следующий\n"
+        "4️⃣ в конце присылает отчёт: какие блоки сейчас выдаются\n\n"
+        "⭐ Найденные подсети будут отмечены в выборе IP.",
         reply_markup=kb(*rows))
 
 
@@ -1050,10 +1078,12 @@ async def scan_custom(cb: CallbackQuery, state: FSMContext):
     hour = data["scan"]["hour"]
     cur = SCAN_CURRENCY.get(data["provider"], "₽")
     await cb.message.edit_text(
-        "✏️ <b>Сколько серверов проверить?</b>\n\n"
+        f"✏️ <b>Сколько {'IP' if data['provider'] in RESERVE_PROVIDERS else 'серверов'} проверить?</b>\n\n"
         f"Отправьте число от 1 до {config.scan_max}, например <code>100</code>.\n\n"
-        f"💸 Примерно {hour:g} {cur} за каждый сервер · 100 серверов ≈ {100 * hour:.2f} {cur}\n"
-        "⏱ Серверы проверяются по одному: создал → записал IP → удалил → следующий.",
+        + (f"💸 Примерно {hour:g} {cur} за каждый сервер · 100 серверов ≈ {100 * hour:.2f} {cur}\n"
+           if data["provider"] not in RESERVE_PROVIDERS else "💸 Проверяются только IP, без серверов — почти бесплатно.\n")
+        + ("" if data["provider"] in RESERVE_PROVIDERS
+           else "⏱ Серверы проверяются по одному: создал → записал IP → удалил → следующий."),
         reply_markup=kb(back("buy:scan", "⬅️ Назад")))
     await cb.answer()
 
@@ -1149,7 +1179,8 @@ async def _run_scan(bot: Bot, msg: Message, uid: int, acc: db.Account, job: Scan
 
     blocks = job.blocks()
     lines = [f"📊 <b>Отчёт разведки</b>\n📍 {hd.quote(label)}\n",
-             f"🖥 Проверено серверов: <b>{job.created}</b> · получено IP: <b>{len(job.ips)}</b>"]
+             (f"🌐 Проверено IP: <b>{job.created}</b>" if acc.provider in RESERVE_PROVIDERS else
+              f"🖥 Проверено серверов: <b>{job.created}</b> · получено IP: <b>{len(job.ips)}</b>")]
     if blocks:
         lines.append(f"🌐 Найдено блоков: <b>{len(blocks)}</b>\n")
         lines += [f"▫️ <code>{p}.#</code> — {n} из {len(job.ips)} ({n * 100 // len(job.ips)}%)" for p, n in blocks]
@@ -1166,7 +1197,8 @@ async def _run_scan(bot: Bot, msg: Message, uid: int, acc: db.Account, job: Scan
         lines.append(f"\n❗ Ошибка: <code>{hd.quote(job.error[:300])}</code>")
     if job.leftovers:
         lines.append("\n⚠️ Не удалось удалить серверы: " + ", ".join(f"<code>{x}</code>" for x in job.leftovers)
-                     + " — удалите их в панели Selectel, чтобы они не списывали деньги.")
+                     + f" — удалите их в панели {PROVIDER_NAMES.get(acc.provider, 'провайдера')}, "
+                       "чтобы они не списывали деньги.")
     await send_safe(bot, uid, "\n".join(lines)[:4000], reply_markup=kb(
         [Btn(text="➡️ Выбрать IP", callback_data=f"buy:reg:{region_idx}")],
         back("menu", "🏠 Главное меню")))

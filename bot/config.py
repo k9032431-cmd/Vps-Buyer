@@ -28,6 +28,13 @@ class Config:
     serverspace_api_url: str = os.getenv("SERVERSPACE_API_URL", "https://api.serverspace.ru")
     do_api_url: str = os.getenv("DO_API_URL", "https://api.digitalocean.com/v2")
     do_geofeed_url: str = os.getenv("DO_GEOFEED_URL", "https://www.digitalocean.com/geo/google.csv")
+    hetzner_api_url: str = os.getenv("HETZNER_API_URL", "https://api.hetzner.cloud/v1")
+    hetzner_geofeed_url: str = os.getenv("HETZNER_GEOFEED_URL", "https://www.hetzner.com/geofeed.csv")
+    vultr_api_url: str = os.getenv("VULTR_API_URL", "https://api.vultr.com/v2")
+    vultr_geofeed_url: str = os.getenv("VULTR_GEOFEED_URL", "https://geofeed.constant.com/")
+    linode_api_url: str = os.getenv("LINODE_API_URL", "https://api.linode.com/v4")
+    linode_geofeed_url: str = os.getenv("LINODE_GEOFEED_URL", "https://geoip.linode.com/")
+    civo_api_url: str = os.getenv("CIVO_API_URL", "https://api.civo.com/v2")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     # 0 = no limit (stop with the ⛔ button).
     # (old MAX_ATTEMPTS from earlier installs is ignored on purpose — it defaulted to 50)

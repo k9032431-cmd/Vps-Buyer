@@ -85,6 +85,16 @@ def ip_matches(ip: str, prefixes: str | list[str]) -> bool:
     return False
 
 
+def _reserve_targets(client, job: "PurchaseJob") -> list[tuple[str | None, str | None]]:
+    """Where to hunt IPs before buying: OpenStack ports on chosen networks (HostVDS), or — for providers that
+    reserve a standalone IP and build a server on it (Hetzner Primary IP, Vultr Reserved IP) — the region."""
+    if not getattr(client, "supports_ports", False):
+        return []
+    if getattr(client, "reserves_ips", False):
+        return [(None, None)]
+    return _port_targets(job)
+
+
 def _port_targets(job: "PurchaseJob") -> list[tuple[str, str | None]]:
     """Distinct (network, subnet) pairs to hunt ports on; a network-wide target makes subnets redundant."""
     targets = [(n, s) for n, s in job.targets if n] or ([(job.network_id, None)] if job.network_id else [])
@@ -128,11 +138,13 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
     """Returns [(port_id, ip)] with matching IPs, or None if ports are not allowed for this account."""
     good: list[tuple[str, str]] = []
     held: list[str] = []
+    held_limit = getattr(client, "max_held_ports", HELD_PORTS_LIMIT)
+    parallel = min(job.port_parallel, getattr(client, "reserve_parallel", job.port_parallel))
     try:
         while len(good) < job.count - len(job.kept) and job.ports_checked < job.max_port_attempts and not job.cancelled:
-            batch = min(job.port_parallel, job.max_port_attempts - job.ports_checked)
+            batch = min(parallel, job.max_port_attempts - job.ports_checked)
             first = job.ports_checked == 0
-            targets = _port_targets(job)
+            targets = _reserve_targets(client, job)
             results = await asyncio.gather(
                 *(client.create_port(job.region, *targets[(job.ports_checked + i) % len(targets)])
                   for i in range(batch)),
@@ -152,8 +164,8 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                     job.log.append(f"🎯 {_code(ip)} — нашёлся, покупаю сервер")
                 else:
                     held.append(port_id)
-            if len(held) > HELD_PORTS_LIMIT:
-                old, held = held[:HELD_PORTS_LIMIT // 2], held[HELD_PORTS_LIMIT // 2:]
+            if len(held) > held_limit:
+                old, held = held[:max(len(held) - held_limit // 2, 1)], held[max(len(held) - held_limit // 2, 1):]
                 await asyncio.gather(*(client.delete_port(job.region, p) for p in old), return_exceptions=True)
             await progress(job)
             if job.error:
@@ -260,7 +272,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
 
 async def run_purchase(client, job: PurchaseJob,
                        on_progress: Callable[[PurchaseJob], Awaitable[None]]) -> PurchaseJob:
-    if getattr(client, "supports_ports", False) and _port_targets(job) and job.prefixes:
+    if _reserve_targets(client, job) and job.prefixes:
         job.mode = "ports"
         # rounds: hunt IPs on free ports → buy servers on them → (check) — until enough servers are kept
         while len(job.kept) < job.count and not job.cancelled and not job.error:

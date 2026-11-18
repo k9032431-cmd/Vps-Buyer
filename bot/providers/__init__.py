@@ -1,37 +1,53 @@
 from ..config import config
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
-from .hostvds import HostVDSClient
 from .aeza import AezaClient
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
+from .civo import CivoClient
 from .digitalocean import DigitalOceanClient
+from .hetzner import HetznerClient
+from .hostvds import HostVDSClient
+from .linode import LinodeClient
 from .selectel import SelectelVDSClient
 from .serverspace import ServerspaceClient
 from .timeweb import TimewebClient
+from .vultr import VultrClient
 
-PROVIDERS = {"hostvds": "HostVDS", "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
-             "serverspace": "Serverspace", "digitalocean": "DigitalOcean"}
-# Providers without a subnet API: IP blocks are learned from servers and IP scouting.
-SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace"}
+# Shown in the bot (buy / accounts menus), in this order.
+PROVIDERS = {"hostvds": "HostVDS", "digitalocean": "DigitalOcean", "hetzner": "Hetzner", "vultr": "Vultr",
+             "linode": "Linode", "civo": "Civo"}
+# Every provider the bot can still talk to — hidden ones stay so servers bought there can be deleted.
+PROVIDER_NAMES = {**PROVIDERS, "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
+                  "serverspace": "Serverspace"}
+# Providers without a subnet list: blocks are learned from servers and IP scouting.
+SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr"}
+# Providers that reserve a standalone IP and build a server on it (fast, almost free IP hunting / scouting).
+RESERVE_PROVIDERS = {"hetzner", "vultr"}
 # Providers connected with a single API token (stored in Account.password).
-TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean"}
-# Providers whose full subnet list is known up front (prefixes are CIDRs, chosen by mask).
-SUBNET_PROVIDERS = {"digitalocean"}
+TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean", "hetzner", "vultr", "linode", "civo"}
+# Providers whose full subnet list is known up front from a geofeed (prefixes are CIDRs, chosen by mask).
+SUBNET_PROVIDERS = {"digitalocean", "hetzner", "vultr", "linode"}
 # Providers that can put your SSH public key on a new server (Aeza's order API has no way to pass one).
-SSH_KEY_PROVIDERS = {"hostvds", "selectel", "timeweb", "serverspace", "digitalocean"}
+SSH_KEY_PROVIDERS = {"hostvds", "selectel", "timeweb", "serverspace", "digitalocean", "hetzner", "vultr",
+                     "linode", "civo"}
+
+_CLIENTS = {
+    "selectel": lambda t: SelectelVDSClient(t, config.selectel_api_url),
+    "timeweb": lambda t: TimewebClient(t, config.timeweb_api_url),
+    "aeza": lambda t: AezaClient(t, config.aeza_api_url),
+    "serverspace": lambda t: ServerspaceClient(t, config.serverspace_api_url),
+    "digitalocean": lambda t: DigitalOceanClient(t, config.do_api_url),
+    "hetzner": lambda t: HetznerClient(t, config.hetzner_api_url),
+    "vultr": lambda t: VultrClient(t, config.vultr_api_url),
+    "linode": lambda t: LinodeClient(t, config.linode_api_url),
+    "civo": lambda t: CivoClient(t, config.civo_api_url),
+}
 
 
 def make_client(provider: str, username: str, password: str, project_name: str):
-    """Build a provider client from stored account fields (for Selectel the token is in `password`)."""
-    if provider == "selectel":
-        return SelectelVDSClient(password, config.selectel_api_url)
-    if provider == "timeweb":
-        return TimewebClient(password, config.timeweb_api_url)
-    if provider == "aeza":
-        return AezaClient(password, config.aeza_api_url)
-    if provider == "serverspace":
-        return ServerspaceClient(password, config.serverspace_api_url)
-    if provider == "digitalocean":
-        return DigitalOceanClient(password, config.do_api_url)
+    """Build a provider client from stored account fields (token providers keep the token in `password`)."""
+    if provider in _CLIENTS:
+        return _CLIENTS[provider](password)
     return HostVDSClient(config.hostvds_auth_url, username, password, project_name)
 
 
-__all__ = ["PROVIDERS", "SCOUT_PROVIDERS", "SUBNET_PROVIDERS", "SSH_KEY_PROVIDERS", "TOKEN_PROVIDERS", "make_client", "Flavor", "Image", "IpPool", "ProviderError", "RegionStatus", "Server"]
+__all__ = ["PROVIDERS", "PROVIDER_NAMES", "RESERVE_PROVIDERS", "SCOUT_PROVIDERS", "SUBNET_PROVIDERS", "SSH_KEY_PROVIDERS",
+           "TOKEN_PROVIDERS", "make_client", "Flavor", "Image", "IpPool", "ProviderError", "RegionStatus", "Server"]

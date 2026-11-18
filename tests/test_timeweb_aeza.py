@@ -264,7 +264,7 @@ async def bot_scenario():
         await dp.feed_update(bot, cb_update(101, "buy:mode:subnets"))
         last = next(c for c in reversed(s.calls) if getattr(c, "reply_markup", None))
         names = [b.text for row in last.reply_markup.inline_keyboard for b in row]
-        assert {"☁️ Timeweb Cloud", "☁️ Aeza"} <= set(names), names
+        assert not {"☁️ Timeweb Cloud", "☁️ Aeza"} & set(names), "hidden from the menu"
         await dp.feed_update(bot, cb_update(2, "acc:add:timeweb"))
         assert "Подтверждение удаления сервисов" in s.texts()[-1]
         user = User(id=UID, is_bot=False, first_name="A")

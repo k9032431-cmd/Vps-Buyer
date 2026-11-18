@@ -1,7 +1,8 @@
 # VPS Buyer — Telegram-бот для покупки серверов
 
-Бот покупает облачные серверы у провайдеров **HostVDS**, **Selectel VDS** (vds.selectel.ru), **Timeweb Cloud**,
-**Aeza**, **Serverspace** и **DigitalOcean** и добивается нужного IP:
+Бот покупает облачные серверы у провайдеров **HostVDS**, **DigitalOcean**, **Hetzner**, **Vultr**, **Linode**
+и **Civo** и добивается нужного IP (Selectel VDS, Timeweb, Aeza и Serverspace скрыты из меню — их код
+оставлен, чтобы уже купленные там серверы можно было удалить):
 если выданный IP не из выбранной подсети, сервер удаляется и создаётся новый —
 пока не наберётся нужное количество серверов с нужным IP.
 
@@ -101,6 +102,18 @@ my.serverspace.ru → **API** → создайте ключ с правом «Vs
 не разворачиваются. Дополнительные публичные интерфейсы Serverspace списывает за месяц сразу, поэтому
 бот не перебирает IP через них — только через серверы.
 
+## Hetzner, Vultr, Linode, Civo
+
+| Провайдер | Ключ | Подсети до покупки | Быстрый подбор IP |
+|---|---|---|---|
+| Hetzner | Console → Security → API tokens (Read & Write) | геофид hetzner.com/geofeed.csv | Primary IP: IP резервируется отдельно, сервер создаётся на нём |
+| Vultr | Account → API (+ Access Control для IP бота) | геофид geofeed.constant.com | Reserved IP: становится основным IP сервера |
+| Linode | Profile → API Tokens (Linodes RW, Account RO) | геофид geoip.linode.com | — (IP виден сразу в ответе на создание) |
+| Civo | Settings → Profile → Security | нет (копятся по покупкам, «Любой IP») | — |
+
+У Hetzner и Vultr разведка IP почти бесплатна: бот резервирует и сразу освобождает отдельные IP, без
+серверов. При удалении сервера Vultr бот освобождает и его Reserved IP (иначе он продолжает оплачиваться).
+
 ## Подключение DigitalOcean
 
 cloud.digitalocean.com → **API → Tokens** → токен с правами Read и Write → отправьте боту.
@@ -149,7 +162,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`, `python -m tests.test_ssh_keys`, `python -m tests.test_working_check`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`, `python -m tests.test_ssh_keys`, `python -m tests.test_working_check`, `python -m tests.test_new_providers`
 
 ## Доступ по приглашению
 

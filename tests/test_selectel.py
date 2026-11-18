@@ -153,6 +153,8 @@ async def scenario():
         acc = (await db.list_accounts(UID, "selectel"))[0]
         assert acc.password == TOKEN
         await dp.feed_update(bot, cb_update(3, "buy:prov:selectel"))
+        assert "Выберите провайдера" in session.texts()[-1], "Selectel is no longer offered for new purchases"
+        await (dp.fsm.get_context(bot, UID, UID)).update_data(provider="selectel")  # an older purchase in progress
         await dp.feed_update(bot, cb_update(4, f"buy:acc:{acc.id}"))
         text = session.texts()[-1]
         print(text)

@@ -6,6 +6,7 @@ from aiogram.utils.text_decorations import html_decoration as hd
 
 from .. import db, providers
 from ..keyboards import PROVIDERS, back, kb
+from ..providers import PROVIDER_NAMES
 
 router = Router()
 
@@ -28,15 +29,15 @@ async def accounts_view(user_id: int, provider: str | None = None, select_prefix
         accounts = await db.list_accounts(user_id, prov)
         total += len(accounts)
         for a in accounts:
-            label = f"🔑 {a.username}" if provider else f"🔑 {PROVIDERS[prov]} · {a.username}"
+            label = f"🔑 {a.username}" if provider else f"🔑 {PROVIDER_NAMES[prov]} · {a.username}"
             if select_prefix:
                 rows.append([Btn(text=label, callback_data=f"{select_prefix}{a.id}")])
             else:
                 rows.append([Btn(text=label, callback_data="noop"), Btn(text="🗑", callback_data=f"acc:del:{a.id}")])
     for prov in shown:
-        rows.append([Btn(text=f"➕ Подключить {PROVIDERS[prov]}", callback_data=f"acc:add:{prov}")])
+        rows.append([Btn(text=f"➕ Подключить {PROVIDER_NAMES[prov]}", callback_data=f"acc:add:{prov}")])
     rows.append(back("buy" if select_prefix else "menu"))
-    title = PROVIDERS[provider] if provider else "провайдеров"
+    title = PROVIDER_NAMES[provider] if provider else "провайдеров"
     text = f"🔑 <b>Аккаунты {title}</b>\n\n"
     text += "👇 Выберите аккаунт для покупки" if select_prefix and total else (
         f"✅ Подключено: <b>{total}</b>" if total else "📭 Пока нет подключённых аккаунтов.\n👇 Подключите аккаунт")
@@ -79,6 +80,19 @@ TOKEN_HELP = {
                      "2️⃣ Создайте токен с правами <b>Read и Write</b>.\n"
                      "3️⃣ Отправьте токен сюда.\n\n"
                      "🌐 Бот покажет все подсети выбранного дата-центра — вы сами отметите нужные."),
+    "hetzner": ("1️⃣ Откройте console.hetzner.cloud → проект → <b>Security → API tokens</b>.\n"
+                "2️⃣ Создайте токен с правами <b>Read & Write</b>.\n"
+                "3️⃣ Отправьте токен сюда."),
+    "vultr": ("1️⃣ Откройте my.vultr.com → <b>Account → API</b>.\n"
+              "2️⃣ Включите API и скопируйте ключ. В <b>Access Control</b> разрешите IP сервера с ботом "
+              "(или «Allow All IPv4»).\n"
+              "3️⃣ Отправьте ключ сюда."),
+    "linode": ("1️⃣ Откройте cloud.linode.com → профиль → <b>API Tokens</b>.\n"
+               "2️⃣ Создайте токен: <b>Linodes — Read/Write</b>, <b>Account — Read Only</b>.\n"
+               "3️⃣ Отправьте токен сюда."),
+    "civo": ("1️⃣ Откройте dashboard.civo.com → <b>Settings → Profile → Security</b>.\n"
+             "2️⃣ Скопируйте API key.\n"
+             "3️⃣ Отправьте ключ сюда."),
     "aeza": ("1️⃣ Откройте my.aeza.net → <b>Настройки → API</b>.\n"
              "2️⃣ Создайте API-ключ.\n"
              "3️⃣ Отправьте ключ сюда.\n\n"
@@ -92,7 +106,7 @@ async def add_start(cb: CallbackQuery, state: FSMContext):
     await state.update_data(provider=provider)
     if provider in TOKEN_HELP:
         await state.set_state(AddAccount.token)
-        text = (f"➕ <b>Подключение {PROVIDERS[provider]}</b>\n\n" + TOKEN_HELP[provider]
+        text = (f"➕ <b>Подключение {PROVIDER_NAMES[provider]}</b>\n\n" + TOKEN_HELP[provider]
                 + "\n\n🔒 Сообщение с ключом бот сразу удалит.")
     else:
         await state.set_state(AddAccount.username)
@@ -145,7 +159,7 @@ async def _save(message: Message, state: FSMContext, username: str | None, secre
     await db.add_account(message.from_user.id, provider, username, secret, project)
     await state.clear()
     await wait.edit_text(
-        f"✅ <b>Аккаунт подключён!</b>\n\n☁️ {PROVIDERS[provider]}\n👤 <code>{hd.quote(username)}</code>\n"
+        f"✅ <b>Аккаунт подключён!</b>\n\n☁️ {PROVIDER_NAMES[provider]}\n👤 <code>{hd.quote(username)}</code>\n"
         f"ℹ️ {hd.quote(info)}",
         reply_markup=kb([Btn(text="🛒 Купить сервер", callback_data="buy")], back("menu", "🏠 Главное меню")),
     )

@@ -55,6 +55,18 @@ def _fatal(e: BaseException) -> bool:
 async def _probe(client, job: ScanJob) -> None:
     if job.cancelled or job.error:
         return
+    if getattr(client, "reserves_ips", False):
+        # Hetzner / Vultr: reserve a standalone IP, note it, release it — no server is bought at all
+        port_id, ip = await client.create_port(job.region, None, None)
+        job.created += 1
+        try:
+            if ip:
+                job.ips.append(ip)
+                job.log.append(f"🔎 <code>{html.escape(ip)}</code>")
+        finally:
+            await client.delete_port(job.region, port_id)
+            job.deleted += 1
+        return
     srv = await client.create_server(job.region, f"ipscan-{secrets.token_hex(3)}", job.flavor, job.image_id,
                                      None, 10)
     job.created += 1

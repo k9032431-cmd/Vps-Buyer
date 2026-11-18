@@ -6,7 +6,8 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton as Btn
 from aiogram.utils.text_decorations import html_decoration as hd
 
 from .. import db
-from ..keyboards import PROVIDERS, back, kb
+from ..keyboards import back, kb
+from ..providers import PROVIDER_NAMES
 from .accounts import make_client
 
 router = Router()
@@ -55,7 +56,7 @@ async def _card(user_id: int, row: db.ServerRow) -> tuple[str, object]:
         text += "🗝 Вход по SSH-ключу (пароль не задан)\n"
     text += (f"💻 SSH: <code>ssh root@{row.ip}</code>\n"
              f"📍 Локация: {hd.quote(row.region)}"
-             f"{' · ' + PROVIDERS[provider] if provider in PROVIDERS else ''}\n"
+             f"{' · ' + PROVIDER_NAMES[provider] if provider in PROVIDER_NAMES else ''}\n"
              f"🗓 Куплен: {row.created_at[:16]}")
     rows = []
     if provider == "hostvds":
