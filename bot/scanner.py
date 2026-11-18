@@ -35,6 +35,7 @@ class ScanJob:
     error: str | None = None
     leftovers: list[str] = field(default_factory=list)  # servers we could not delete
     started: float = field(default_factory=time.time)
+    task: asyncio.Task | None = field(default=None, repr=False, compare=False)  # the running scan
     finished_probes: int = 0
 
     def eta_seconds(self) -> float | None:

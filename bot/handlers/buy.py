@@ -28,6 +28,21 @@ log = logging.getLogger(__name__)
 # user_id -> running job
 JOBS: dict[int, "PurchaseJob | ScanJob"] = {}
 
+
+def running_jobs() -> dict[int, "PurchaseJob | ScanJob"]:
+    """Purchases / scans that are really running. Entries whose task is gone are dropped, so a failed
+    start can never leave a "purchase in progress" behind."""
+    for uid, job in list(JOBS.items()):
+        if job.task is None or job.task.done():
+            JOBS.pop(uid, None)
+    return JOBS
+
+
+def start_job(uid: int, job, coro) -> None:
+    """Start a purchase / scan and register it (the task is kept, so it can't be garbage-collected)."""
+    job.task = asyncio.create_task(coro)
+    JOBS[uid] = job
+
 MAX_IP_BUTTONS = 60
 
 
@@ -55,7 +70,7 @@ async def _error(cb: CallbackQuery, e: Exception):
 @router.callback_query(F.data == "buy")
 async def choose_mode(cb: CallbackQuery, state: FSMContext):
     await state.clear()
-    if cb.from_user.id in JOBS:
+    if cb.from_user.id in running_jobs():
         await cb.answer("⏳ Уже идёт покупка — дождитесь окончания или остановите её.", show_alert=True)
         return
     await cb.message.edit_text(
@@ -877,7 +892,7 @@ def server_card(ip: str, password: str | None, name: str = "", label: str = "", 
 @router.callback_query(F.data == "buy:go")
 async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
     uid = cb.from_user.id
-    if uid in JOBS:
+    if uid in running_jobs():
         await cb.answer("⏳ Покупка уже идёт", show_alert=True)
         return
     data = await state.get_data()
@@ -901,11 +916,13 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
         job.check_url, job.check_timeout = config.check_url, config.check_ssh_timeout
         if data["provider"] in SSH_KEY_PROVIDERS:
             job.bot_key = sshkey.bot_key()  # the bot's own key rides along so it can log in and check
-    JOBS[uid] = job
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
-    await cb.message.edit_text(_progress_text(job, label=data.get("region_label", "")), reply_markup=cancel_kb)
+    start_job(uid, job, _run(bot, cb.message, uid, acc, job, cancel_kb, data.get("region_label", "")))
     await cb.answer()
-    asyncio.create_task(_run(bot, cb.message, uid, acc, job, cancel_kb, data.get("region_label", "")))
+    try:
+        await cb.message.edit_text(_progress_text(job, label=data.get("region_label", "")), reply_markup=cancel_kb)
+    except Exception:
+        pass  # the purchase runs anyway; progress updates will retry
 
 
 async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJob, cancel_kb, label: str = ""):
@@ -983,7 +1000,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
 
 @router.callback_query(F.data == "buy:cancel")
 async def cancel(cb: CallbackQuery):
-    job = JOBS.get(cb.from_user.id)
+    job = running_jobs().get(cb.from_user.id)
     if job:
         job.cancelled = True
         await cb.answer("⛔ Останавливаю после текущей попытки…", show_alert=True)
@@ -1065,7 +1082,7 @@ async def scan_custom_set(message: Message, state: FSMContext, bot: Bot):
 
 
 async def start_scan(msg: Message, state: FSMContext, bot: Bot, uid: int, samples: int, edit: bool):
-    if uid in JOBS:
+    if uid in running_jobs():
         await msg.answer("⏳ Уже идёт покупка или разведка — дождитесь окончания или остановите её.")
         return
     data = await state.get_data()
@@ -1075,16 +1092,18 @@ async def start_scan(msg: Message, state: FSMContext, bot: Bot, uid: int, sample
     acc = await db.get_account(uid, data["account_id"])
     job = ScanJob(region=data["region"], flavor=Flavor(**data["scan"]["flavor"]), image_id=data["scan"]["image_id"],
                   samples=samples, parallel=config.scan_parallel)
-    JOBS[uid] = job
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
     label = data["region_label"]
     if edit:
-        await msg.edit_text(_scan_text(job, label), reply_markup=cancel_kb)
+        try:
+            await msg.edit_text(_scan_text(job, label), reply_markup=cancel_kb)
+        except Exception:
+            pass
         progress_msg = msg
     else:
         progress_msg = await msg.answer(_scan_text(job, label), reply_markup=cancel_kb)
     region_idx = data["regions"].index(data["region"])
-    asyncio.create_task(_run_scan(bot, progress_msg, uid, acc, job, cancel_kb, label, region_idx))
+    start_job(uid, job, _run_scan(bot, progress_msg, uid, acc, job, cancel_kb, label, region_idx))
 
 
 def _fmt_duration(seconds: float) -> str:

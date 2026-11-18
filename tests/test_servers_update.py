@@ -123,7 +123,29 @@ async def scenario():
 
     stop = []
     dp.stop_polling = lambda: asyncio.sleep(0, stop.append(1))
-    await dp.feed_update(bot, cb_update(5, "update"), dispatcher=dp)
+
+    # a "purchase" whose task is already gone (failed start) must not block the update any more
+    from bot.buyer import PurchaseJob
+    from bot.providers import Flavor as F_
+    stale = PurchaseJob("r", F_("f", "f", 1, 1, 1), "i", None, [], 1, 0, 1, 1, 1)
+    done = asyncio.ensure_future(asyncio.sleep(0))
+    await done
+    stale.task = done
+    buy.JOBS[777] = stale
+    assert buy.running_jobs() == {} and buy.JOBS == {}
+
+    # a purchase that really runs: the update screen offers to stop it first
+    running = PurchaseJob("r", F_("f", "f", 1, 1, 1), "i", None, [], 1, 0, 1, 1, 1)
+
+    async def fake_purchase():
+        while not running.cancelled:
+            await asyncio.sleep(0.01)
+    buy.start_job(888, running, fake_purchase())
+    await dp.feed_update(bot, cb_update(50, "update"), dispatcher=dp)
+    assert "Сейчас идут покупки: 1" in session.texts()[-1] and "других пользователей: 1" in session.texts()[-1]
+    assert stop == [] and not running.cancelled
+    await dp.feed_update(bot, cb_update(5, "update:force"), dispatcher=dp)
+    assert running.cancelled and running.task.done(), "stopped before updating"
     assert stop == [1]
     text = "\n".join(session.texts()[-2:])
     assert "Бот обновлён" in text and "Новая фича" in text, text

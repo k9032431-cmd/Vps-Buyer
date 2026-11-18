@@ -64,6 +64,7 @@ class PurchaseJob:
     subnets: list[str] = field(default_factory=list)  # their subnets (CIDR), when the provider reports masks
     cancelled: bool = False
     error: str | None = None
+    task: asyncio.Task | None = field(default=None, repr=False, compare=False)  # the running purchase
 
 
 def ip_matches(ip: str, prefixes: str | list[str]) -> bool:
