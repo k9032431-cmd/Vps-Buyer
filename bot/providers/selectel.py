@@ -146,9 +146,11 @@ class SelectelVDSClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None,
+                            extra_keys: list[str] | None = None) -> Server:
         password = None if ssh_key else _password()
-        key_id = await self._key_id(ssh_key) if ssh_key else None
+        # with a password the bot logs in by password; extra keys only ride along with your own key
+        key_ids = [await self._key_id(k) for k in [ssh_key, *(extra_keys or [])]] if ssh_key else []
         async with self._create_lock:  # respect 12 creates per minute
             wait = self._last_create + CREATE_INTERVAL - time.time()
             if wait > 0:
@@ -156,7 +158,7 @@ class SelectelVDSClient:
             self._last_create = time.time()
             data = await self._request("POST", "/scalets", {
                 "make_from": image_id, "rplan": flavor.id, "do_start": True, "name": name, "location": region,
-                **({"keys": [key_id]} if key_id else {"password": password}),
+                **({"keys": key_ids} if key_ids else {"password": password}),
             })
         srv = self._server(data)
         srv.admin_pass = password

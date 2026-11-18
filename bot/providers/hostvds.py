@@ -12,7 +12,8 @@ import aiohttp
 from passlib.hash import sha512_crypt
 
 from . import hostvds_public as public
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24, ssh_key_script
+from .base import (Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24, merge_scripts,
+                   ssh_key_script)
 
 COMPUTE_MICROVERSION = "compute 2.47"
 
@@ -33,13 +34,16 @@ def make_password(length: int = 16) -> str:
 def password_user_data(password: str, user: str = "root") -> str:
     """Same script the HostVDS panel sends: set the root password (sha512 hash) once cloud-init has run.
     HostVDS images ignore Nova's adminPass, so without this the password is unknown."""
+    return base64.b64encode(password_script(password, user).encode()).decode()
+
+
+def password_script(password: str, user: str = "root") -> str:
     pw_hash = sha512_crypt.using(rounds=5000).hash(password)
-    script = "\n".join([
+    return "\n".join([
         "#!/bin/bash",
         f"((sleep 15; printf %s {shlex.quote(f'{user}:{pw_hash}')} | chpasswd --encrypted) "
         f"&& passwd -u {shlex.quote(user)})&",
     ])
-    return base64.b64encode(script.encode()).decode()
 
 
 class HostVDSClient:
@@ -311,14 +315,16 @@ class HostVDSClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None,
+                            extra_keys: list[str] | None = None) -> Server:
         if port_id:
             networks = [{"port": port_id}]
         else:
             networks = [{"uuid": network_id}] if network_id else "auto"
         password = None if ssh_key else make_password()
-        user_data = (base64.b64encode(ssh_key_script(ssh_key).encode()).decode() if ssh_key
-                     else password_user_data(password))
+        keys = ([ssh_key] if ssh_key else []) + list(extra_keys or [])
+        script = merge_scripts(password_script(password) if password else None, ssh_key_script(keys) if keys else None)
+        user_data = base64.b64encode(script.encode()).decode()
         server: dict = {"name": name, "flavorRef": flavor.id, "networks": networks, "user_data": user_data}
         if not port_id:  # a port already carries its security group
             server["security_groups"] = [{"name": await self.security_group(region)}]

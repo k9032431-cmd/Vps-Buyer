@@ -261,6 +261,7 @@ async def bot_scenario():
         dp = Dispatcher()
         dp.include_routers(access.router, menu.router, accounts.router, servers.router, buy.router, update.router)
         await dp.feed_update(bot, cb_update(1, "buy"))
+        await dp.feed_update(bot, cb_update(101, "buy:mode:subnets"))
         last = next(c for c in reversed(s.calls) if getattr(c, "reply_markup", None))
         names = [b.text for row in last.reply_markup.inline_keyboard for b in row]
         assert {"☁️ Timeweb Cloud", "☁️ Aeza"} <= set(names), names

@@ -18,7 +18,7 @@ import aiohttp
 from passlib.hash import sha512_crypt
 
 from ..config import config
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, ssh_key_script
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, merge_scripts, ssh_key_script
 
 API_URL = "https://api.digitalocean.com/v2"
 
@@ -80,9 +80,9 @@ def password_script(password: str) -> str:
     ])
 
 
-def key_script(public_key: str) -> str:
-    """Add the key for root and lift DigitalOcean's "change your password at first login" (belt and braces)."""
-    return ssh_key_script(public_key) + '\nchage -d "$(date +%F)" root 2>/dev/null || true'
+def key_script(public_keys: str | list[str]) -> str:
+    """Add the keys for root and lift DigitalOcean's "change your password at first login" (belt and braces)."""
+    return ssh_key_script(public_keys) + '\nchage -d "$(date +%F)" root 2>/dev/null || true'
 
 
 class DigitalOceanClient:
@@ -202,17 +202,20 @@ class DigitalOceanClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None,
+                            extra_keys: list[str] | None = None) -> Server:
         password = None if ssh_key else _password()
+        keys = ([ssh_key] if ssh_key else []) + list(extra_keys or [])
         body = {"name": name, "region": region, "size": flavor.id, "image": image_id,
-                "user_data": key_script(ssh_key) if ssh_key else password_script(password),
+                "user_data": merge_scripts(password_script(password) if password else None,
+                                           key_script(keys) if keys else None),
                 "ipv6": False, "monitoring": False, "tags": ["vps-buyer"]}
-        if ssh_key:
+        if keys:
             # Without a key in the API, DigitalOcean sets an EXPIRED root password, and even a key login
             # then stops at "Current password:". With ssh_keys it sets no password at all.
-            key_id = await self._key_id(ssh_key)
-            if key_id:
-                body["ssh_keys"] = [key_id]
+            ids = [i for i in [await self._key_id(k) for k in keys] if i]
+            if ids:
+                body["ssh_keys"] = ids
         data = await self._request("POST", "/droplets", body)
         srv = self._server(data["droplet"])
         srv.admin_pass = password

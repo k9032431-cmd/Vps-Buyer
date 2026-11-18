@@ -47,6 +47,11 @@ class PurchaseJob:
     ssh_key: str | None = None                                    # log in with this public key instead of a password
     ssh_key_name: str = ""
     hinted: bool = False
+    # "only working" mode: the bot logs in over SSH and opens this page from the server
+    check_url: str | None = None
+    bot_key: tuple[str, str] | None = None       # (private key file, public key line) of the bot
+    check_timeout: int = 300                     # how long to wait for SSH on a fresh server
+    checked: int = 0                             # servers checked over SSH
     max_port_attempts: int = 500
     port_parallel: int = 10
     kept: list[Server] = field(default_factory=list)
@@ -184,25 +189,53 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
 
 
 # ---------------- fallback mode: servers ----------------
+async def _check(client, job: PurchaseJob, state: Server, ip: str) -> tuple[bool, str]:
+    """"Only working" mode: log in over SSH and open the check page from the server."""
+    from . import checker
+    if not state.admin_pass and hasattr(client, "finalize"):  # Aeza: set a known password first
+        await _finalize(client, job, state)
+        state.finalized = True
+    job.checked += 1
+    ok, why = await checker.check_server(ip, job.check_url, password=state.admin_pass,
+                                         key_file=job.bot_key[0] if job.bot_key else None,
+                                         ssh_timeout=job.check_timeout)
+    return bool(ok), why
+
+
 async def _try_server(client, job: PurchaseJob) -> None:
     name = f"vps-{secrets.token_hex(3)}"
     srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id, job.boot_volume_gb,
-                                     metadata=job.metadata, ssh_key=job.ssh_key)
+                                     metadata=job.metadata, ssh_key=job.ssh_key,
+                                     extra_keys=[job.bot_key[1]] if job.bot_key else None)
+    reason = "не тот IP"
     try:
         state = await client.wait_ip(job.region, srv.id, job.active_timeout)
         job.seen += state.ipv4
         job.subnets += [c for c in state.cidrs if c not in job.subnets]
-        good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefixes)), None)
+        if job.prefixes:
+            good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefixes)), None)
+        else:  # no subnets chosen ("only working" mode): any IP will do
+            good = state.ipv4[0] if state.ipv4 else None
         if good and state.status != "ERROR" and len(job.kept) < job.count and not job.cancelled:
             if state.status != "ACTIVE":
                 state = await client.wait_active(job.region, srv.id, job.active_timeout)
             if state.status == "ACTIVE":
                 state.admin_pass = state.admin_pass or srv.admin_pass
                 state.ipv4 = [good] + [ip for ip in state.ipv4 if ip != good]
-                job.log.append(f"✅ {_code(good)} — подходит, оставлен")
-                await _finalize(client, job, state)
-                await _found(job, state)
-                return
+                works = True
+                if job.check_url:
+                    job.log.append(f"🔎 {_code(good)} — захожу по SSH и проверяю сайт…")
+                    works, why = await _check(client, job, state, good)
+                    reason = why or "сайт не открылся"
+                if works and len(job.kept) < job.count and not job.cancelled:
+                    job.log.append(f"✅ {_code(good)} — " + ("сайт открылся, сервер рабочий" if job.check_url
+                                                            else "подходит, оставлен"))
+                    if not getattr(state, "finalized", False):
+                        await _finalize(client, job, state)
+                    await _found(job, state)
+                    return
+            else:
+                reason = f"не запустился ({state.status})"
     except BaseException:
         await client.delete_server(job.region, srv.id)
         job.deleted += 1
@@ -210,12 +243,12 @@ async def _try_server(client, job: PurchaseJob) -> None:
     await client.delete_server(job.region, srv.id)
     job.deleted += 1
     ips = ", ".join(_code(ip) for ip in state.ipv4) or "без IP"
-    job.log.append(f"🗑 {ips} — не тот IP, удалён")
+    job.log.append(f"🗑 {ips} — {html.escape(reason)}, удалён")
 
 
 async def run_purchase(client, job: PurchaseJob,
                        on_progress: Callable[[PurchaseJob], Awaitable[None]]) -> PurchaseJob:
-    if getattr(client, "supports_ports", False) and _port_targets(job):
+    if getattr(client, "supports_ports", False) and _port_targets(job) and job.prefixes:
         job.mode = "ports"
         good = await _hunt_ports(client, job, on_progress)
         if good is None:
@@ -261,7 +294,7 @@ async def run_purchase(client, job: PurchaseJob,
             if isinstance(r, BaseException):
                 _note_error(job, r)
                 busy = busy or (isinstance(r, ProviderError) and r.status == 429)
-        if (not job.kept and not job.hinted and job.attempts >= NO_MATCH_HINT
+        if (job.prefixes and not job.kept and not job.hinted and job.attempts >= NO_MATCH_HINT
                 and not any(ip_matches(ip, job.prefixes) for ip in job.seen)):
             job.hinted = True
             job.log.append(f"💡 За {job.attempts} попыток ни одного IP из выбранных подсетей — похоже, этот "

@@ -42,6 +42,15 @@
 Для серверов, купленных до этого исправления, в карточке сервера есть **«🛠 Восстановить доступ»**:
 добавляет `allow_all` и переустанавливает ту же систему с новым паролем (IP не меняется, диск стирается).
 
+**Два способа покупки** (первый экран «🛒 Купить сервер»):
+- **🎯 По подсетям** — всё, что описано выше: выбираете подсети, бот покупает сервер с IP из них.
+- **✅ Только рабочий** — шаг подсетей пропускается. Бот покупает сервер, ждёт загрузки, **сам заходит
+  на него по SSH** и выполняет `curl CHECK_URL` (по умолчанию `https://turkmenistanairlines.tm/`; если
+  curl нет — wget или python). Пришёл HTML — сервер рабочий и отправляется вам, нет — удаляется и
+  покупается следующий. Для входа у бота свой SSH-ключ (`data/bot_ssh_key`, создаётся один раз); он
+  добавляется на сервер вместе с вашим паролем или ключом. У Aeza (ключ при заказе не передать) бот
+  входит по паролю. Сколько ждать SSH на новом сервере — `CHECK_SSH_TIMEOUT` (300 с).
+
 **🔐 Доступ: пароль или SSH-ключ.** После выбора ОС бот спрашивает, как входить на сервер: «🔑 Пароль
 root» или SSH-ключ. Публичный ключ (`ssh-ed25519 …`, `ssh-rsa …`, `ecdsa-…`) добавляется один раз и
 сохраняется для следующих покупок; приватный ключ бот не принимает и сразу удаляет такое сообщение.
@@ -142,7 +151,7 @@ cp .env.example .env      # заполните BOT_TOKEN, ADMIN_IDS, ENCRYPTION_
 python -m bot.main
 ```
 
-Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`, `python -m tests.test_ssh_keys`
+Тесты (с фейковым OpenStack API): `python -m tests.test_purchase`, `python -m tests.test_regions`, `python -m tests.test_servers_update`, `python -m tests.test_selectel`, `python -m tests.test_ip_select`, `python -m tests.test_network_plan`, `python -m tests.test_repair`, `python -m tests.test_access`, `python -m tests.test_scan`, `python -m tests.test_timeweb_aeza`, `python -m tests.test_serverspace`, `python -m tests.test_digitalocean`, `python -m tests.test_ssh_keys`, `python -m tests.test_working_check`
 
 ## Доступ по приглашению
 

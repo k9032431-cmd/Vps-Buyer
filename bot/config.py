@@ -35,6 +35,9 @@ class Config:
     # Fast mode (HostVDS): max free port checks per job and how many at once.
     max_port_attempts: int = int(os.getenv("MAX_PORT_ATTEMPTS", "500"))
     port_parallel: int = int(os.getenv("PORT_PARALLEL", "10"))
+    # "Only working" purchase: the page the bot opens from each new server over SSH
+    check_url: str = os.getenv("CHECK_URL", "https://turkmenistanairlines.tm/")
+    check_ssh_timeout: int = int(os.getenv("CHECK_SSH_TIMEOUT", "300"))
     # Selectel IP scouting: max servers per run and how many exist at once (1 = strictly one by one).
     scan_max: int = int(os.getenv("SCAN_MAX", "200"))
     scan_parallel: int = int(os.getenv("SCAN_PARALLEL", "1"))

@@ -15,7 +15,7 @@ from .. import db, geo
 from ..buyer import PurchaseJob, run_purchase
 from ..scanner import ScanJob, run_scan
 from ..config import config
-from .. import os_names
+from .. import os_names, sshkey
 from ..providers import SCOUT_PROVIDERS, SSH_KEY_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
 from ..providers.base import normalize_ssh_key, prefix24, subnet_blocks
 from ..providers.hostvds_public import money
@@ -53,14 +53,31 @@ async def _error(cb: CallbackQuery, e: Exception):
 
 # ---------- 1. provider ----------
 @router.callback_query(F.data == "buy")
-async def choose_provider(cb: CallbackQuery, state: FSMContext):
+async def choose_mode(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     if cb.from_user.id in JOBS:
         await cb.answer("⏳ Уже идёт покупка — дождитесь окончания или остановите её.", show_alert=True)
         return
+    site = _site()
+    await cb.message.edit_text(
+        "🛒 <b>Покупка сервера</b>\n\nКак будем искать сервер? 👇\n\n"
+        "🎯 <b>По подсетям</b> — вы выбираете подсети, бот покупает сервер с IP из них.\n\n"
+        f"✅ <b>Только рабочий</b> — бот сам заходит на каждый новый сервер и проверяет, открывается ли "
+        f"<code>{hd.quote(site)}</code>. Присылает только рабочие, остальные удаляет.",
+        reply_markup=kb([Btn(text="🎯 По подсетям", callback_data="buy:mode:subnets")],
+                        [Btn(text="✅ Только рабочий", callback_data="buy:mode:check")],
+                        back("menu", "🏠 Главное меню")))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("buy:mode:"))
+async def choose_provider(cb: CallbackQuery, state: FSMContext):
+    mode = cb.data.split(":")[2]
+    await state.update_data(buy_mode=mode)
     rows = [[Btn(text=f"☁️ {name}", callback_data=f"buy:prov:{key}")] for key, name in PROVIDERS.items()]
-    await cb.message.edit_text("🛒 <b>Покупка сервера</b>\n\n<b>Шаг 1.</b> Выберите провайдера 👇",
-                               reply_markup=kb(*rows, back("menu", "🏠 Главное меню")))
+    title = "✅ Только рабочий сервер" if mode == "check" else "🎯 Сервер по подсетям"
+    await cb.message.edit_text(f"🛒 <b>{title}</b>\n\n<b>Шаг 1.</b> Выберите провайдера 👇",
+                               reply_markup=kb(*rows, back("buy", "⬅️ Назад")))
     await cb.answer()
 
 
@@ -118,7 +135,7 @@ async def show_regions(cb: CallbackQuery, state: FSMContext, account_id: int):
             [Btn(text="🔄 Проверить снова", callback_data=f"buy:refresh:{data['account_id']}")], back("buy")))
         return
     await state.update_data(regions=[r for r, _ in available], region_labels={r: label for r, label in available})
-    text = (f"📍 <b>Шаг 2.</b> Выберите локацию 👇\n\n"
+    text = (f"📍 <b>Шаг {_step(data, 'region')}.</b> Выберите локацию 👇\n\n"
             f"✅ Доступно: <b>{len(available)}</b> из {len(regions)}")
     if unavailable:
         text += "\n\n🚫 <i>Сейчас недоступны:</i>\n" + "\n".join(
@@ -143,10 +160,12 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if "regions" not in data:  # e.g. a button from an old message after the menu was opened
         await cb.answer("🔁 Начните покупку заново", show_alert=True)
-        return await choose_provider(cb, state)
+        return await choose_mode(cb, state)
     region = data["regions"][int(cb.data.split(":")[2])]
     label = data["region_labels"][region]
     await state.update_data(region=region, region_label=label)
+    if data.get("buy_mode") == "check":
+        return await _skip_ip_step(cb, state, region)
     await cb.message.edit_text(f"⏳ Смотрю свободные IP в <b>{hd.quote(label)}</b>…")
     await cb.answer()
     try:
@@ -166,6 +185,22 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full),
                             ip_group=None)
     await render_ip_screen(cb.message, state, edit=True)
+
+
+async def _skip_ip_step(cb: CallbackQuery, state: FSMContext, region: str):
+    """"Only working" mode: any IP will do. For OpenStack (HostVDS) still pick a public network with free IPs."""
+    await cb.answer()
+    network_id = None
+    try:
+        async with await _client_for(cb, state) as client:
+            pools = await client.ip_pools(region)
+        nets = [p for p in pools if p.network_id and p.free != 0]
+        if nets:
+            network_id = max(nets, key=lambda p: p.free or 0).network_id
+    except Exception as e:
+        log.info("ip_pools in check mode failed: %s", e)
+    await state.update_data(prefixes=[], targets=[], network_id=network_id, pools=[])
+    await ask_count(cb.message, state, edit=True)
 
 
 def _mark_hits(pools: list[IpPool], seen: list[str], subnets: list[str]) -> list[IpPool]:
@@ -204,6 +239,18 @@ def _fit(lines: list[str], budget: int) -> str:
 
 def _attempts_text() -> str:
     return f"максимум {config.max_attempts} созданий" if config.max_attempts > 0 else "без лимита попыток"
+
+
+def _site() -> str:
+    return config.check_url.split("//")[-1].strip("/")
+
+
+def _step(data: dict, name: str) -> int:
+    """Number of a step in the flow actually shown (no IP step in "only working" mode, network plan only
+    when the tariff has one)."""
+    order = ["provider", "region"] + ([] if data.get("buy_mode") == "check" else ["ip"]) + ["count", "tariff"]
+    order += (["netplan"] if data.get("has_netplan") else []) + ["os", "access"]
+    return order.index(name) + 1
 
 
 def _plural_subnets(n: int) -> str:
@@ -496,9 +543,14 @@ def prefixes_text(prefixes: list[str], limit: int = 20) -> str:
 async def ask_count(message: Message, state: FSMContext, edit: bool = False):
     await state.set_state(Buy.count)
     data = await state.get_data()
-    text = (f"🔢 <b>Шаг 4.</b> Сколько серверов купить?\n\n"
-            f"🎯 Ищем: {prefixes_text(data['prefixes'])}\n\n"
-            "💡 Это общее число серверов с любым из выбранных IP. Нажмите кнопку или отправьте число.")
+    if data.get("buy_mode") == "check":
+        text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько рабочих серверов нужно?\n\n"
+                f"✅ Рабочий — с него открывается <code>{hd.quote(_site())}</code>\n\n"
+                "💡 Нажмите кнопку или отправьте число.")
+    else:
+        text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько серверов купить?\n\n"
+                f"🎯 Ищем: {prefixes_text(data['prefixes'])}\n\n"
+                "💡 Это общее число серверов с любым из выбранных IP. Нажмите кнопку или отправьте число.")
     buttons = [Btn(text=str(n), callback_data=f"buy:cnt:{n}") for n in (1, 2, 3, 5, 10)]
     markup = kb(buttons, back("buy", "❌ Отмена"))
     if edit:
@@ -543,7 +595,7 @@ async def show_flavors(msg: Message, state: FSMContext, user_id: int):
                         + (f" · {f.disk_gb} GB" if f.disk_gb else "") + (f" · {f.price}" if f.price else ""),
                    callback_data=f"buy:fl:{i}")
                for i, f in enumerate(flavors)]
-    await msg.edit_text("⚙️ <b>Шаг 5.</b> Выберите тариф 👇\n\n💡 CPU · RAM · диск · цена в месяц",
+    await msg.edit_text(f"⚙️ <b>Шаг {_step(data, 'tariff')}.</b> Выберите тариф 👇\n\n💡 CPU · RAM · диск · цена в месяц",
                         reply_markup=kb(*grid(buttons, 1), back("buy", "❌ Отмена")))
 
 
@@ -552,10 +604,11 @@ async def show_flavors(msg: Message, state: FSMContext, user_id: int):
 async def flavor_selected(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     flavor = data["flavors"][int(cb.data.split(":")[2])]
-    await state.update_data(flavor=flavor, network_plan=None)
+    await state.update_data(flavor=flavor, network_plan=None, has_netplan=False)
     await cb.answer()
     if len(flavor.get("network_plans") or []) > 1:
-        await show_network_plans(cb.message, flavor, show_all=False)
+        await state.update_data(has_netplan=True)
+        await show_network_plans(cb.message, flavor, show_all=False, data=await state.get_data())
     else:
         await choose_image(cb, state)
 
@@ -565,14 +618,14 @@ def _plan_label(p: dict, currency: str, default: str) -> str:
     return f"{'⭐ ' if p['name'] == default else ''}{p['title']} · {price}"
 
 
-async def show_network_plans(msg: Message, flavor: dict, show_all: bool):
+async def show_network_plans(msg: Message, flavor: dict, show_all: bool, data: dict | None = None):
     plans = flavor["network_plans"]
     shown = [(i, p) for i, p in enumerate(plans) if show_all or p["visible"]]
     rows = [[Btn(text=_plan_label(p, flavor.get("currency", "usd"), flavor.get("default_network_plan")),
                  callback_data=f"buy:np:{i}")] for i, p in shown]
     if not show_all and len(shown) < len(plans):
         rows.append([Btn(text=f"🔽 Показать все планы ({len(plans)})", callback_data="buy:npall")])
-    text = (f"📶 <b>Шаг 6.</b> Network plan для <b>{hd.quote(flavor['name'])}</b> 👇\n\n"
+    text = (f"📶 <b>Шаг {_step({**(data or {}), 'has_netplan': True}, 'netplan')}.</b> Network plan для <b>{hd.quote(flavor['name'])}</b> 👇\n\n"
             "⭐ Limited — входит в тариф, трафик ограничен\n"
             "♾ Unlimited Shared — безлимитный трафик, общий канал\n"
             "🚀 Unlimited Dedicated — безлимит, выделенный канал (в «Все планы»)")
@@ -581,7 +634,8 @@ async def show_network_plans(msg: Message, flavor: dict, show_all: bool):
 
 @router.callback_query(F.data == "buy:npall")
 async def network_plans_all(cb: CallbackQuery, state: FSMContext):
-    await show_network_plans(cb.message, (await state.get_data())["flavor"], show_all=True)
+    data = await state.get_data()
+    await show_network_plans(cb.message, data["flavor"], show_all=True, data=data)
     await cb.answer()
 
 
@@ -607,15 +661,16 @@ async def choose_image(cb: CallbackQuery, state: FSMContext):
     choices, other = os_names.simplify(images)
     await state.update_data(images=[{"id": c.id, "name": c.title, "distro": c.distro} for c in choices],
                             other_images=[asdict(i) for i in other[:40]])
-    await _show_os(cb.message, choices, bool(other))
+    await _show_os(cb.message, choices, bool(other), await state.get_data())
 
 
-async def _show_os(msg: Message, choices, has_other: bool):
+async def _show_os(msg: Message, choices, has_other: bool, data: dict | None = None):
     buttons = [Btn(text=c.title, callback_data=f"buy:img:{n}") for n, c in enumerate(choices[:40])]
     rows = grid(buttons, 2)
     if has_other:
         rows.append([Btn(text="📦 Другие образы", callback_data="buy:imgother")])
-    text = "💿 <b>Шаг 7.</b> Выберите операционную систему 👇" if choices else "💿 <b>Шаг 7.</b> Выберите образ 👇"
+    n = _step(data or {}, "os")
+    text = f"💿 <b>Шаг {n}.</b> Выберите операционную систему 👇" if choices else f"💿 <b>Шаг {n}.</b> Выберите образ 👇"
     await msg.edit_text(text, reply_markup=kb(*rows, back("buy", "❌ Отмена")))
 
 
@@ -632,7 +687,7 @@ async def other_images(cb: CallbackQuery, state: FSMContext):
 async def images_back(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     choices = [os_names.OsChoice(i["id"], i["name"], i["name"], i.get("distro", "")) for i in data["images"]]
-    await _show_os(cb.message, choices, bool(data.get("other_images")))
+    await _show_os(cb.message, choices, bool(data.get("other_images")), data)
     await cb.answer()
 
 
@@ -659,7 +714,7 @@ async def show_access(msg: Message, state: FSMContext, user_id: int, edit: bool)
                      Btn(text="🗑", callback_data=f"buy:auth:del:{key_id}")])
     rows.append([Btn(text="➕ Добавить SSH-ключ", callback_data="buy:auth:add")])
     rows.append(back("buy", "❌ Отмена"))
-    text = ("🔐 <b>Шаг 8.</b> Как входить на сервер?\n\n"
+    text = (f"🔐 <b>Шаг {_step(await state.get_data(), 'access')}.</b> Как входить на сервер?\n\n"
             "🔑 <b>Пароль root</b> — бот пришлёт пароль вместе с IP.\n"
             "🗝 <b>SSH-ключ</b> — на сервер добавится ваш публичный ключ, вход без пароля: "
             "<code>ssh root@IP</code>.")
@@ -747,7 +802,8 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
         "🧾 <b>Проверьте заказ</b>\n",
         f"☁️ Провайдер: <b>{PROVIDERS[data['provider']]}</b>",
         f"📍 Локация: <b>{hd.quote(data['region_label'])}</b>",
-        f"🎯 Ищем IP: {prefixes_text(data['prefixes'])}",
+        (f"✅ Только рабочий: открывается <code>{hd.quote(_site())}</code>" if data.get("buy_mode") == "check"
+         else f"🎯 Ищем IP: {prefixes_text(data['prefixes'])}"),
         f"⚙️ Тариф: <b>{hd.quote(f['name'])}</b> · {f['vcpus']} vCPU · {f['ram_mb'] / 1024:g} GB"
         + (f" · {f['price']}" if f.get("price") else ""),
     ]
@@ -770,8 +826,13 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
-    lines.append(f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). "
-                 "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
+    if data.get("buy_mode") == "check":
+        lines.append("🔎 Бот заходит на каждый новый сервер по SSH и открывает сайт. Не открылся — сервер "
+                     f"удаляется ({_attempts_text()}). Каждое создание может стоить денег — остановить можно "
+                     "кнопкой ⛔.")
+    else:
+        lines.append(f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). "
+                     "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
     text = "\n".join(lines)
     await _send(msg, text, kb([Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")), edit)
 
@@ -779,9 +840,12 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
 # ---------- 9. run ----------
 def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str:
     head = "🏁 <b>Покупка завершена</b>" if done else "⏳ <b>Идёт покупка…</b>"
-    text = (f"{head}\n\n"
-            f"📍 {hd.quote(label or job.region)}\n"
-            f"🎯 Ищем: {prefixes_text(job.prefixes, 10)}\n")
+    text = f"{head}\n\n📍 {hd.quote(label or job.region)}\n"
+    if job.check_url:
+        text += f"✅ Нужен рабочий: открывается <code>{hd.quote(_site())}</code>\n"
+        text += f"🔎 Проверено по SSH: <b>{job.checked}</b>\n"
+    else:
+        text += f"🎯 Ищем: {prefixes_text(job.prefixes, 10)}\n"
     if job.mode == "ports":
         text += f"⚡ Проверено IP (бесплатно): <b>{job.ports_checked}</b>\n"
     text += (f"✅ Готово: <b>{len(job.kept)}/{job.count}</b>   "
@@ -840,6 +904,10 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
     key = await db.get_ssh_key(uid, data["ssh_key_id"]) if data.get("ssh_key_id") else None
     if key and data["provider"] in SSH_KEY_PROVIDERS:
         job.ssh_key, job.ssh_key_name = key[2], key[1]
+    if data.get("buy_mode") == "check":
+        job.check_url, job.check_timeout = config.check_url, config.check_ssh_timeout
+        if data["provider"] in SSH_KEY_PROVIDERS:
+            job.bot_key = sshkey.bot_key()  # the bot's own key rides along so it can log in and check
     JOBS[uid] = job
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
     await cb.message.edit_text(_progress_text(job, label=data.get("region_label", "")), reply_markup=cancel_kb)
@@ -874,8 +942,10 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
                 await save(server)
             except Exception:
                 log.exception("saving server %s failed", server.id)
-            await send_safe(bot, uid, f"🎉 <b>Нашёлся IP!</b>  ({len(job.kept)}/{job.count})\n\n"
+            head = "✅ <b>Рабочий сервер!</b>" if job.check_url else "🎉 <b>Нашёлся IP!</b>"
+            await send_safe(bot, uid, f"{head}  ({len(job.kept)}/{job.count})\n\n"
                             + server_card(server.ipv4[0], server.admin_pass, server.name, label, job.ssh_key_name)
+                            + (f"\n🌐 <code>{hd.quote(_site())}</code> открывается" if job.check_url else "")
                             + ("\n\n⏱ Ключ начнёт работать примерно через минуту после запуска." if job.ssh_key
                                else "\n\n⏱ Пароль начнёт работать примерно через минуту после запуска."
                                if acc.provider in ("hostvds", "digitalocean") else ""))

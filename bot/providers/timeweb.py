@@ -137,11 +137,13 @@ class TimewebClient:
 
     async def create_server(self, region: str, name: str, flavor: Flavor, image_id: str,
                             network_id: str | None, boot_volume_gb: int, port_id: str | None = None,
-                            metadata: dict | None = None, ssh_key: str | None = None) -> Server:
+                            metadata: dict | None = None, ssh_key: str | None = None,
+                            extra_keys: list[str] | None = None) -> Server:
         body = {"name": name, "preset_id": int(flavor.id), "os_id": int(image_id),
                 "availability_zone": region, "is_ddos_guard": False}
-        if ssh_key:
-            body["cloud_init"] = ssh_key_script(ssh_key)
+        keys = ([ssh_key] if ssh_key else []) + list(extra_keys or [])
+        if keys:
+            body["cloud_init"] = ssh_key_script(keys)
         data = await self._request("POST", "/api/v1/servers", body)
         return self._server(data["server"])
 

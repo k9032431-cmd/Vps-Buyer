@@ -103,6 +103,7 @@ class Server:
     ipv4: list[str]
     admin_pass: str | None = None
     cidrs: list[str] = field(default_factory=list)   # public subnets of its IPs, when the provider tells
+    finalized: bool = False                          # provider-specific last step already done
 
 
 SSH_KEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
@@ -123,11 +124,21 @@ def normalize_ssh_key(text: str) -> str | None:
     return " ".join(parts[:3])
 
 
-def ssh_key_script(public_key: str) -> str:
-    """First-boot script that lets root log in with this key (for user_data / cloud_init style fields)."""
+def ssh_key_script(public_keys: str | list[str]) -> str:
+    """First-boot script that lets root log in with these keys (for user_data / cloud_init style fields)."""
+    keys = [public_keys] if isinstance(public_keys, str) else list(public_keys)
     return "\n".join([
         "#!/bin/bash",
         "mkdir -p /root/.ssh && chmod 700 /root/.ssh",
-        f"printf '%s\\n' {shlex.quote(public_key)} >> /root/.ssh/authorized_keys",
+        *(f"printf '%s\\n' {shlex.quote(k)} >> /root/.ssh/authorized_keys" for k in keys),
         "chmod 600 /root/.ssh/authorized_keys",
     ])
+
+
+def merge_scripts(*scripts: str | None) -> str:
+    """Join several "#!/bin/bash" scripts into one (user_data takes a single script)."""
+    body = []
+    for s in scripts:
+        if s:
+            body += [line for line in s.splitlines() if not line.startswith("#!")]
+    return "\n".join(["#!/bin/bash", *body])
