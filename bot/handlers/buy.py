@@ -58,12 +58,10 @@ async def choose_mode(cb: CallbackQuery, state: FSMContext):
     if cb.from_user.id in JOBS:
         await cb.answer("⏳ Уже идёт покупка — дождитесь окончания или остановите её.", show_alert=True)
         return
-    site = _site()
     await cb.message.edit_text(
         "🛒 <b>Покупка сервера</b>\n\nКак будем искать сервер? 👇\n\n"
         "🎯 <b>По подсетям</b> — вы выбираете подсети, бот покупает сервер с IP из них.\n\n"
-        f"✅ <b>Только рабочий</b> — бот сам заходит на каждый новый сервер и проверяет, открывается ли "
-        f"<code>{hd.quote(site)}</code>. Присылает только рабочие, остальные удаляет.",
+        "✅ <b>Только рабочий</b> — бот проверяет каждый новый сервер и присылает только рабочие.",
         reply_markup=kb([Btn(text="🎯 По подсетям", callback_data="buy:mode:subnets")],
                         [Btn(text="✅ Только рабочий", callback_data="buy:mode:check")],
                         back("menu", "🏠 Главное меню")))
@@ -239,10 +237,6 @@ def _fit(lines: list[str], budget: int) -> str:
 
 def _attempts_text() -> str:
     return f"максимум {config.max_attempts} созданий" if config.max_attempts > 0 else "без лимита попыток"
-
-
-def _site() -> str:
-    return config.check_url.split("//")[-1].strip("/")
 
 
 def _step(data: dict, name: str) -> int:
@@ -545,7 +539,7 @@ async def ask_count(message: Message, state: FSMContext, edit: bool = False):
     data = await state.get_data()
     if data.get("buy_mode") == "check":
         text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько рабочих серверов нужно?\n\n"
-                f"✅ Рабочий — с него открывается <code>{hd.quote(_site())}</code>\n\n"
+                "✅ Бот пришлёт только серверы, прошедшие проверку.\n\n"
                 "💡 Нажмите кнопку или отправьте число.")
     else:
         text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько серверов купить?\n\n"
@@ -802,7 +796,7 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
         "🧾 <b>Проверьте заказ</b>\n",
         f"☁️ Провайдер: <b>{PROVIDERS[data['provider']]}</b>",
         f"📍 Локация: <b>{hd.quote(data['region_label'])}</b>",
-        (f"✅ Только рабочий: открывается <code>{hd.quote(_site())}</code>" if data.get("buy_mode") == "check"
+        ("✅ Способ: <b>только рабочие серверы</b>" if data.get("buy_mode") == "check"
          else f"🎯 Ищем IP: {prefixes_text(data['prefixes'])}"),
         f"⚙️ Тариф: <b>{hd.quote(f['name'])}</b> · {f['vcpus']} vCPU · {f['ram_mb'] / 1024:g} GB"
         + (f" · {f['price']}" if f.get("price") else ""),
@@ -827,9 +821,8 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
     if data.get("buy_mode") == "check":
-        lines.append("🔎 Бот заходит на каждый новый сервер по SSH и открывает сайт. Не открылся — сервер "
-                     f"удаляется ({_attempts_text()}). Каждое создание может стоить денег — остановить можно "
-                     "кнопкой ⛔.")
+        lines.append(f"🔎 Каждый новый сервер проверяется, не прошедшие проверку удаляются ({_attempts_text()}). "
+                     "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
     else:
         lines.append(f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). "
                      "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
@@ -842,8 +835,8 @@ def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str
     head = "🏁 <b>Покупка завершена</b>" if done else "⏳ <b>Идёт покупка…</b>"
     text = f"{head}\n\n📍 {hd.quote(label or job.region)}\n"
     if job.check_url:
-        text += f"✅ Нужен рабочий: открывается <code>{hd.quote(_site())}</code>\n"
-        text += f"🔎 Проверено по SSH: <b>{job.checked}</b>\n"
+        text += "✅ Ищем: <b>рабочие серверы</b>\n"
+        text += f"🔎 Проверено: <b>{job.checked}</b>\n"
     else:
         text += f"🎯 Ищем: {prefixes_text(job.prefixes, 10)}\n"
     if job.mode == "ports":
@@ -945,7 +938,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
             head = "✅ <b>Рабочий сервер!</b>" if job.check_url else "🎉 <b>Нашёлся IP!</b>"
             await send_safe(bot, uid, f"{head}  ({len(job.kept)}/{job.count})\n\n"
                             + server_card(server.ipv4[0], server.admin_pass, server.name, label, job.ssh_key_name)
-                            + (f"\n🌐 <code>{hd.quote(_site())}</code> открывается" if job.check_url else "")
+                            + ("\n✅ Проверка пройдена" if job.check_url else "")
                             + ("\n\n⏱ Ключ начнёт работать примерно через минуту после запуска." if job.ssh_key
                                else "\n\n⏱ Пароль начнёт работать примерно через минуту после запуска."
                                if acc.provider in ("hostvds", "digitalocean") else ""))

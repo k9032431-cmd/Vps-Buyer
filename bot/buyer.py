@@ -199,6 +199,8 @@ async def _check(client, job: PurchaseJob, state: Server, ip: str) -> tuple[bool
     ok, why = await checker.check_server(ip, job.check_url, password=state.admin_pass,
                                          key_file=job.bot_key[0] if job.bot_key else None,
                                          ssh_timeout=job.check_timeout)
+    if not ok:
+        logging.getLogger(__name__).info("check failed for %s: %s", ip, why)
     return bool(ok), why
 
 
@@ -224,11 +226,11 @@ async def _try_server(client, job: PurchaseJob) -> None:
                 state.ipv4 = [good] + [ip for ip in state.ipv4 if ip != good]
                 works = True
                 if job.check_url:
-                    job.log.append(f"🔎 {_code(good)} — захожу по SSH и проверяю сайт…")
-                    works, why = await _check(client, job, state, good)
-                    reason = why or "сайт не открылся"
+                    job.log.append(f"🔎 {_code(good)} — проверяю…")
+                    works, _why = await _check(client, job, state, good)  # details stay in the bot's log
+                    reason = "не прошёл проверку"
                 if works and len(job.kept) < job.count and not job.cancelled:
-                    job.log.append(f"✅ {_code(good)} — " + ("сайт открылся, сервер рабочий" if job.check_url
+                    job.log.append(f"✅ {_code(good)} — " + ("проверка пройдена, сервер рабочий" if job.check_url
                                                             else "подходит, оставлен"))
                     if not getattr(state, "finalized", False):
                         await _finalize(client, job, state)

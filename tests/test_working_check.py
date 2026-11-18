@@ -113,8 +113,10 @@ async def purchase_scenario(port):
         assert found == ["142.93.99.1"] and [k.ipv4[0] for k in job.kept] == ["142.93.99.1"]
         assert sorted(st["deleted"]) == [9000, 9001], "servers where the site did not open are deleted"
         assert job.checked == 3
-        assert any("сайт открылся, сервер рабочий" in line for line in job.log)
-        assert any("страница не открылась, удалён" in line for line in job.log)
+        assert any("проверка пройдена, сервер рабочий" in line for line in job.log)
+        assert any("не прошёл проверку, удалён" in line for line in job.log)
+        secret = ("turkmen", "ssh", "curl", "сайт", "страниц")
+        assert not any(w in line.lower() for line in job.log for w in secret), job.log
         # the bot's key went to the droplet together with the password set-up
         body = st["created"][0]
         assert body["ssh_keys"] == [600] and keys[0]["public_key"] == sshkey.bot_key()[1]
@@ -137,7 +139,7 @@ async def ui_scenario():
         return [b.text for row in last.reply_markup.inline_keyboard for b in row]
 
     await dp.feed_update(bot, cb_update(1, "buy"))
-    assert "Как будем искать сервер" in s.texts()[-1] and "turkmenistanairlines.tm" in s.texts()[-1]
+    assert "Как будем искать сервер" in s.texts()[-1] and "присылает только рабочие" in s.texts()[-1]
     assert markup()[:2] == ["🎯 По подсетям", "✅ Только рабочий"]
     await dp.feed_update(bot, cb_update(2, "buy:mode:check"))
     assert "✅ Только рабочий сервер" in s.texts()[-1] and "Шаг 1." in s.texts()[-1]
@@ -162,8 +164,10 @@ async def ui_scenario():
     await dp.feed_update(bot, cb_update(5, "buy:auth:pw"))
     confirm = s.texts()[-1]
     print("\n" + confirm)
-    assert "✅ Только рабочий: открывается <code>turkmenistanairlines.tm</code>" in confirm
-    assert "Ищем IP" not in confirm and "заходит на каждый новый сервер по SSH" in confirm
+    assert "✅ Способ: <b>только рабочие серверы</b>" in confirm and "Ищем IP" not in confirm
+    shown = "\n".join(s.texts()).lower()
+    for word in ("turkmen", "curl", "сайт", "по ssh", "открывается"):
+        assert word not in shown, f"the check method leaks into the bot texts: {word}"
 
     # subnet mode keeps the old numbering with the IP step
     await dp.feed_update(bot, cb_update(6, "buy:mode:subnets"))
