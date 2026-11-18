@@ -10,6 +10,7 @@ import asyncssh
 log = logging.getLogger(__name__)
 
 HTML_MARKERS = ("<html", "<!doctype html")
+RETRY_EVERY = 3  # seconds between SSH attempts while a fresh server boots
 
 
 def target(ip: str) -> tuple[str, int]:
@@ -19,7 +20,7 @@ def target(ip: str) -> tuple[str, int]:
 
 def fetch_command(url: str) -> str:
     u = shlex.quote(url)
-    return (f"(curl -sSL -m 25 {u} || wget -qO- -T 25 {u} || "
+    return (f"(curl -sSL --connect-timeout 8 -m 20 {u} || wget -qO- -T 15 {u} || "
             f"python3 -c \"import urllib.request,sys;sys.stdout.write(urllib.request.urlopen({url!r},timeout=25)"
             f".read().decode('utf-8','replace'))\") 2>/dev/null | head -c 200000")
 
@@ -49,5 +50,5 @@ async def check_server(ip: str, url: str, password: str | None = None, key_file:
         except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
             # booting, sshd not up yet, our key / password not applied yet — try again shortly
             last_error = f"SSH: {type(e).__name__}"
-            await asyncio.sleep(10)
+            await asyncio.sleep(RETRY_EVERY)
     return None, last_error

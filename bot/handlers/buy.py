@@ -181,8 +181,11 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
                             await db.subnets(data["provider"], region))
     full = [p for p in pools if p.free == 0]          # provider says: no free addresses there
     pools = [p for p in pools if p.free != 0]
-    await state.update_data(pools=[asdict(p) for p in pools], selected=[], custom=[], full_blocks=len(full),
-                            ip_group=None)
+    stats = await db.check_stats(data["provider"], region)
+    dicts = [asdict(p) for p in pools]
+    for d in dicts:  # earlier "only working" results inside this pool: passed / failed checks
+        d["passed"], d["failed"] = _pool_checks(d["prefix"], stats)
+    await state.update_data(pools=dicts, selected=[], custom=[], full_blocks=len(full), ip_group=None)
     await render_ip_screen(cb.message, state, edit=True)
 
 
@@ -224,6 +227,35 @@ def _mark_hits(pools: list[IpPool], seen: list[str], subnets: list[str]) -> list
                 p.hits += 1
                 break
     return sorted(pools, key=lambda p: ipaddress.ip_network(p.prefix, strict=False))
+
+
+def _pool_checks(prefix: str, stats: dict[str, list[int]]) -> tuple[int, int]:
+    """Sum of earlier check results (/24 blocks) that fall inside this pool."""
+    if not stats:
+        return 0, 0
+    if "/" in prefix:
+        net = ipaddress.ip_network(prefix, strict=False)
+        inside = [v for b, v in stats.items() if ipaddress.ip_address(b + ".0") in net]
+    else:
+        inside = [v for b, v in stats.items() if (b + ".").startswith(prefix + ".")]
+    return sum(v[0] for v in inside), sum(v[1] for v in inside)
+
+
+def _work_mark(p: dict) -> str:
+    """🟢 checks passed here before · 🚫 only failed · "" unknown."""
+    if p.get("passed"):
+        return "🟢"
+    if p.get("failed", 0) >= 2:
+        return "🚫"
+    return ""
+
+
+def _work_note(p: dict) -> str:
+    if p.get("passed"):
+        return f" · 🟢 рабочих {p['passed']}"
+    if p.get("failed", 0) >= 2:
+        return " · 🚫 не проходит"
+    return ""
 
 
 def _subnet_mode(pools: list[dict]) -> bool:
@@ -292,25 +324,32 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
         for i, p in enumerate(pools):
             groups.setdefault(_group(p["prefix"]), []).append(i)
         hits = {g: sum(pools[i].get("hits", 0) for i in idx) for g, idx in groups.items()}
-        groups = dict(sorted(groups.items(), key=lambda kv: -hits[kv[0]]))  # ⭐ issued here first
+        works = {g: sum(pools[i].get("passed", 0) for i in idx) for g, idx in groups.items()}
+        # 🟢 passed the check before, then ⭐ issued here, then the rest
+        groups = dict(sorted(groups.items(), key=lambda kv: (-works[kv[0]], -hits[kv[0]])))
         text = (f"🌐 <b>Шаг 3.</b> Выберите подсети\n"
                 f"📍 {hd.quote(data['region_label'])} · подсетей: <b>{len(pools)}</b> · "
                 f"блоков /24: <b>{sum(_blocks(p['prefix']) for p in pools)}</b>\n\n")
         lines = []
         for g, idx in groups.items():
             picked = sum(1 for i in idx if i in selected)
-            lines.append(f"{'✅' if picked else '⭐' if hits[g] else '▫️'} <code>{g}.#.#</code> — "
+            lines.append(f"{'✅' if picked else '🟢' if works[g] else '⭐' if hits[g] else '▫️'} <code>{g}.#.#</code> — "
                          f"{len(idx)} {_plural_subnets(len(idx))}"
+                         + (f", 🟢 рабочих {works[g]}" if works[g] else "")
                          + (f", выпадало {hits[g]}" if hits[g] else "")
                          + (f", выбрано {picked}" if picked else ""))
         text += _fit(lines, 3000)
         text += "\n\n💡 Откройте группу и отметьте подсети с нужной маской — бот купит сервер с IP из любой из них."
+        if any(works.values()):
+            text += "\n🟢 — здесь уже находились рабочие серверы: выбирайте их, так быстрее."
         if any(hits.values()):
             text += ("\n⭐ — подсети, которые <b>этот дата-центр</b> уже выдавал вам. Список провайдера общий на "
                      "город, поэтому надёжнее выбирать ⭐.")
-        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else '⭐ ' if hits[g] else ''}{g}.#.# · {len(idx)}",
-                       callback_data=f"buy:ipg:{g}") for g, idx in list(groups.items())[:80]]
+        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else '🟢 ' if works[g] else '⭐ ' if hits[g] else ''}"
+                            f"{g}.#.# · {len(idx)}", callback_data=f"buy:ipg:{g}") for g, idx in list(groups.items())[:80]]
         rows = grid(buttons, 2)
+        if any(works.values()):
+            rows.append([Btn(text="🟢 Выбрать рабочие", callback_data="buy:ipwork")])
         if any(hits.values()):
             rows.append([Btn(text="⭐ Выбрать выпадавшие", callback_data="buy:iphits")])
         rows.append([Btn(text="🌐 Любой IP", callback_data="buy:ipany")])
@@ -321,10 +360,11 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
     else:
         idx = [i for i, p in enumerate(pools) if _group(p["prefix"]) == group]
         text = (f"🌐 <b>Подсети {group}.#.#</b> · {len(idx)}\n📍 {hd.quote(data['region_label'])}\n\n"
-                + _fit([f"{'✅' if i in selected else '⭐' if pools[i].get('hits') else '▫️'} "
+                + _fit([f"{'✅' if i in selected else _work_mark(pools[i]) or ('⭐' if pools[i].get('hits') else '▫️')} "
                         f"<code>{pools[i]['prefix']}</code> · {_blocks(pools[i]['prefix'])} бл."
-                        + (f" · выпадало {pools[i]['hits']}" if pools[i].get("hits") else "") for i in idx], 3000))
-        buttons = [Btn(text=f"{'✅ ' if i in selected else '⭐ ' if pools[i].get('hits') else ''}{pools[i]['prefix']}",
+                        + (f" · выпадало {pools[i]['hits']}" if pools[i].get("hits") else "") + _work_note(pools[i])
+                        for i in idx], 3000))
+        buttons = [Btn(text=f"{'✅ ' if i in selected else (_work_mark(pools[i]) + ' ').lstrip() or ('⭐ ' if pools[i].get('hits') else '')}{pools[i]['prefix']}",
                        callback_data=f"buy:ipt:{i}") for i in idx[:80]]
         rows = grid(buttons, 2)
         if len(idx) > len(buttons):
@@ -347,6 +387,15 @@ async def ip_group(cb: CallbackQuery, state: FSMContext):
     await state.update_data(ip_group=None if group == "-" else group)
     await render_ip_screen(cb.message, state, edit=True)
     await cb.answer()
+
+
+@router.callback_query(F.data == "buy:ipwork")
+async def ip_select_working(cb: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = set(data.get("selected", [])) | {i for i, p in enumerate(data["pools"]) if p.get("passed")}
+    await state.update_data(selected=sorted(selected))
+    await render_ip_screen(cb.message, state, edit=True)
+    await cb.answer("🟢 Отмечены подсети, где уже находились рабочие серверы")
 
 
 @router.callback_query(F.data == "buy:iphits")
@@ -378,8 +427,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     text = (f"🌐 <b>Шаг 3.</b> Какие IP искать?\n"
             f"📍 {hd.quote(data['region_label'])} · блоков: <b>{len(pools)}</b>\n\n")
     if pools:
-        text += "\n".join(f"{'✅' if i in selected else '▫️'} <code>{p['prefix']}.#</code>"
-                          + (f" · свободно {p['free']}" if p.get("free") else "")
+        text += "\n".join(f"{'✅' if i in selected else _work_mark(p) or '▫️'} <code>{p['prefix']}.#</code>"
+                          + (f" · свободно {p['free']}" if p.get("free") else "") + _work_note(p)
                           for i, p in enumerate(pools[:150]))
         if len(pools) > 150:
             text += f"\n… и ещё {len(pools) - 150}"
@@ -397,12 +446,15 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     total = len(selected) + len(custom)
     text += ("\n\n💡 Отметьте <b>один или несколько</b> блоков — бот купит сервер, как только выпадет любой из них."
              f"\n\n☑️ Выбрано: <b>{total}</b>")
-    buttons = [Btn(text=f"{'✅ ' if i in selected else ''}{p['prefix']}.#", callback_data=f"buy:ipt:{i}")
+    buttons = [Btn(text=f"{'✅ ' if i in selected else (_work_mark(p) + ' ').lstrip()}{p['prefix']}.#",
+                   callback_data=f"buy:ipt:{i}")
                for i, p in enumerate(shown)]
     rows = grid(buttons, 2)
     if len(shown) > 1:
         rows.append([Btn(text="☑️ Выбрать все", callback_data="buy:ipall"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
+    if any(p.get("passed") for p in pools):
+        rows.append([Btn(text="🟢 Выбрать рабочие", callback_data="buy:ipwork")])
     rows.append([Btn(text="✏️ Свой IP", callback_data="buy:ip:custom"),
                  Btn(text="🌐 Любой IP", callback_data="buy:ipany")])
     if data.get("provider") in SCOUT_PROVIDERS:
@@ -837,8 +889,27 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
     lines.append((f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). " if data["prefixes"]
                   else f"💸 Подбор {_attempts_text()}. ")
                  + "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
+    par = data.get("parallel") or config.parallel
+    lines.append(f"\n⚡ <b>Скорость:</b> {par} {_plural_servers(par)} одновременно — больше серверов сразу, "
+                 "быстрее найдётся рабочий (и тем больше пробных серверов за раз).")
     text = "\n".join(lines)
-    await _send(msg, text, kb([Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")), edit)
+    speed = [Btn(text=f"{'✅ ' if n == par else ''}⚡{n}", callback_data=f"buy:par:{n}") for n in SPEEDS]
+    await _send(msg, text, kb(speed, [Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")), edit)
+
+
+SPEEDS = (1, 3, 5, 10)
+
+
+def _plural_servers(n: int) -> str:
+    return "сервер" if n % 10 == 1 and n % 100 != 11 else "сервера" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "серверов"
+
+
+@router.callback_query(F.data.startswith("buy:par:"))
+async def set_speed(cb: CallbackQuery, state: FSMContext):
+    n = int(cb.data.split(":")[2])
+    await state.update_data(parallel=n)
+    await cb.answer(f"⚡ {n} одновременно")
+    await render_confirm(cb.message, state, edit=True)
 
 
 # ---------- 9. run ----------
@@ -847,7 +918,8 @@ def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str
     text = f"{head}\n\n📍 {hd.quote(label or job.region)}\n"
     text += f"🎯 Ищем: {prefixes_text(job.prefixes, 10) if job.prefixes else '🌐 любой IP'}\n"
     if job.check_url:
-        text += f"🔎 Проверено: <b>{job.checked}</b>\n"
+        text += f"🔎 Проверено: <b>{job.checked}</b>"
+        text += f"   ⏭ Пропущено (нерабочие блоки): <b>{job.skipped_bad}</b>\n" if job.skipped_bad else "\n"
     if job.mode == "ports":
         text += f"⚡ Проверено IP (бесплатно): <b>{job.ports_checked}</b>\n"
     text += (f"✅ Готово: <b>{len(job.kept)}/{job.count}</b>   "
@@ -900,7 +972,7 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
                   "os_distro": data["image"].get("distro"), "kind": data["flavor"].get("kind")}
         if data["provider"] == "hostvds" else {},
         port_parallel=config.port_parallel,
-        max_attempts=config.max_attempts, parallel=config.parallel,
+        max_attempts=config.max_attempts, parallel=data.get("parallel") or config.parallel,
         active_timeout=config.active_timeout, boot_volume_gb=config.boot_volume_gb,
     )
     key = await db.get_ssh_key(uid, data["ssh_key_id"]) if data.get("ssh_key_id") else None
@@ -908,6 +980,7 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
         job.ssh_key, job.ssh_key_name = key[2], key[1]
     if config.check_url:  # every purchase: matching servers are checked before they are sent
         job.check_url, job.check_timeout = config.check_url, config.check_ssh_timeout
+        job.block_stats = await db.check_stats(data["provider"], data["region"])
         if data["provider"] in SSH_KEY_PROVIDERS:
             job.bot_key = sshkey.bot_key()  # the bot's own key rides along so it can log in and check
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
@@ -966,6 +1039,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
 
     await db.add_seen_ips(acc.provider, job.region, job.seen)
     await db.add_subnets(acc.provider, job.region, job.subnets)
+    await db.add_check_results(acc.provider, job.region, job.check_results)
     for server in job.kept:  # make sure every bought server is in "My servers"
         try:
             await save(server)

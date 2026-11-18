@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS ip_seen (
     ip TEXT NOT NULL,
     PRIMARY KEY (provider, region, ip)
 );
+CREATE TABLE IF NOT EXISTS check_blocks (
+    provider TEXT NOT NULL,
+    region TEXT NOT NULL,
+    block TEXT NOT NULL,             -- a.b.c (/24)
+    passed INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (provider, region, block)
+);
 CREATE TABLE IF NOT EXISTS ssh_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
@@ -314,4 +322,24 @@ async def get_ssh_key(user_id: int, key_id: int) -> tuple[int, str, str] | None:
 async def delete_ssh_key(user_id: int, key_id: int) -> None:
     async with aiosqlite.connect(config.db_path) as db:
         await db.execute("DELETE FROM ssh_keys WHERE id=? AND user_id=?", (key_id, user_id))
+        await db.commit()
+
+
+# ---------- "only working" check results per /24 block ----------
+async def check_stats(provider: str, region: str) -> dict[str, list[int]]:
+    async with aiosqlite.connect(config.db_path) as db:
+        rows = await (await db.execute("SELECT block, passed, failed FROM check_blocks WHERE provider=? AND region=?",
+                                       (provider, region))).fetchall()
+    return {b: [p, f] for b, p, f in rows}
+
+
+async def add_check_results(provider: str, region: str, results: list[tuple[str, bool]]) -> None:
+    if not results:
+        return
+    async with aiosqlite.connect(config.db_path) as db:
+        for block, passed in results:
+            await db.execute(
+                "INSERT INTO check_blocks (provider, region, block, passed, failed) VALUES (?,?,?,?,?) "
+                "ON CONFLICT(provider, region, block) DO UPDATE SET passed=passed+excluded.passed, "
+                "failed=failed+excluded.failed", (provider, region, block, int(passed), int(not passed)))
         await db.commit()

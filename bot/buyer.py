@@ -52,6 +52,10 @@ class PurchaseJob:
     bot_key: tuple[str, str] | None = None       # (private key file, public key line) of the bot
     check_timeout: int = 300                     # how long to wait for SSH on a fresh server
     checked: int = 0                             # servers checked over SSH
+    # check results per /24 block: {"95.182.87": [passed, failed]} — earlier purchases + this one
+    block_stats: dict = field(default_factory=dict)
+    check_results: list = field(default_factory=list)  # (block, passed) found in this purchase
+    skipped_bad: int = 0                         # servers / IPs dropped at once because their block fails
     max_port_attempts: int = 500
     port_parallel: int = 10
     kept: list[Server] = field(default_factory=list)
@@ -65,6 +69,23 @@ class PurchaseJob:
     cancelled: bool = False
     error: str | None = None
     task: asyncio.Task | None = field(default=None, repr=False, compare=False)  # the running purchase
+
+
+BAD_BLOCK_FAILS = 2  # a /24 with this many failed checks and no pass is skipped without checking
+
+
+def block_is_bad(job: "PurchaseJob", ip: str) -> bool:
+    if not job.check_url:
+        return False
+    passed, failed = job.block_stats.get(ip.rsplit(".", 1)[0], (0, 0))
+    return passed == 0 and failed >= BAD_BLOCK_FAILS
+
+
+def _remember_check(job: "PurchaseJob", ip: str, passed: bool) -> None:
+    block = ip.rsplit(".", 1)[0]
+    stats = job.block_stats.setdefault(block, [0, 0])
+    stats[0 if passed else 1] += 1
+    job.check_results.append((block, passed))
 
 
 def ip_matches(ip: str, prefixes: str | list[str]) -> bool:
@@ -159,7 +180,10 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 port_id, ip = r
                 if ip:
                     job.seen.append(ip)
-                if ip and ip_matches(ip, job.prefixes) and len(good) < job.count - len(job.kept):
+                if ip and block_is_bad(job, ip) and ip_matches(ip, job.prefixes):
+                    job.skipped_bad += 1
+                if (ip and ip_matches(ip, job.prefixes) and not block_is_bad(job, ip)
+                        and len(good) < job.count - len(job.kept)):
                     good.append((port_id, ip))
                     job.log.append(f"🎯 {_code(ip)} — нашёлся, покупаю сервер")
                 else:
@@ -223,6 +247,8 @@ async def _check(client, job: PurchaseJob, state: Server, ip: str) -> tuple[bool
                                          ssh_timeout=job.check_timeout)
     if not ok:
         logging.getLogger(__name__).info("check failed for %s: %s", ip, why)
+    if ok is not None:  # an SSH problem says nothing about the IP itself
+        _remember_check(job, ip, bool(ok))
     return bool(ok), why
 
 
@@ -240,6 +266,9 @@ async def _try_server(client, job: PurchaseJob) -> None:
             good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefixes)), None)
         else:  # no subnets chosen ("only working" mode): any IP will do
             good = state.ipv4[0] if state.ipv4 else None
+        if good and block_is_bad(job, good):
+            good, reason = None, "блок не проходит проверку"
+            job.skipped_bad += 1
         if good and state.status != "ERROR" and len(job.kept) < job.count and not job.cancelled:
             if state.status != "ACTIVE":
                 state = await client.wait_active(job.region, srv.id, job.active_timeout)
@@ -247,7 +276,10 @@ async def _try_server(client, job: PurchaseJob) -> None:
                 state.admin_pass = state.admin_pass or srv.admin_pass
                 state.ipv4 = [good] + [ip for ip in state.ipv4 if ip != good]
                 works = True
-                if job.check_url:
+                if block_is_bad(job, good):
+                    works, reason = False, "блок не проходит проверку"
+                    job.skipped_bad += 1
+                elif job.check_url:
                     job.log.append(f"🔎 {_code(good)} — проверяю…")
                     works, _why = await _check(client, job, state, good)  # details stay in the bot's log
                     reason = "не прошёл проверку"

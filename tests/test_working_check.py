@@ -199,6 +199,65 @@ async def ports_scenario():
         await srv.close()
 
 
+async def learning_scenario(port):
+    """Bad /24 blocks are learned: after 2 failed checks and no pass, servers there are dropped unchecked."""
+    from bot.buyer import block_is_bad
+    checker.target = lambda ip: (CURRENT_IP.__setitem__(0, ip) or ("127.0.0.1", port))
+    digitalocean.asyncio.sleep = lambda s: ORIG_SLEEP(0)
+    app, st = do_t.make_app([("142.93.100.1", "255.255.240.0"), ("142.93.100.2", "255.255.240.0"),
+                             ("142.93.100.3", "255.255.240.0"), ("142.93.99.1", "255.255.240.0")])
+    st["limit"] = 100
+    app.router.add_route("*", "/v2/account/keys", lambda r: do_t.web.json_response(
+        {"ssh_keys": [], "links": {}}) if r.method == "GET" else do_t.web.json_response({"ssh_key": {"id": 1}}, status=201))
+    srv = TestServer(app)
+    await srv.start_server()
+    try:
+        async with DigitalOceanClient(do_t.TOKEN, str(srv.make_url("/v2"))) as c:
+            job = PurchaseJob("fra1", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64", None,
+                              ["142.93.96.0/20"], 1, max_attempts=0, parallel=1, active_timeout=30,
+                              boot_volume_gb=10, check_url=config.check_url, bot_key=sshkey.bot_key(),
+                              check_timeout=20)
+            await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+        print("\n".join(job.log))
+        assert job.checked == 3, "142.93.100.1 and .2 checked and failed, .3 skipped, 142.93.99.1 checked and passed"
+        assert job.skipped_bad == 1 and any("блок не проходит проверку" in l for l in job.log)
+        assert [k.ipv4[0] for k in job.kept] == ["142.93.99.1"]
+        assert job.block_stats["142.93.100"] == [0, 2] and job.block_stats["142.93.99"] == [1, 0]
+        assert block_is_bad(job, "142.93.100.77") and not block_is_bad(job, "142.93.99.5")
+        await db.add_check_results("digitalocean", "fra1", job.check_results)
+        assert await db.check_stats("digitalocean", "fra1") == {"142.93.100": [0, 2], "142.93.99": [1, 0]}
+    finally:
+        await srv.close()
+        digitalocean.asyncio.sleep = ORIG_SLEEP
+
+
+async def ports_learning_scenario():
+    """Fast mode: an IP from a known-bad block is not even bought."""
+    from bot.providers.hostvds import HostVDSClient
+    from tests import test_purchase as hv_t
+    app, st = hv_t.make_port_app(["94.103.80.11", "94.103.81.5"] + [f"123.45.0.{i}" for i in range(10, 60)])
+    srv = TestServer(app)
+    await srv.start_server()
+    try:
+        async with HostVDSClient(str(srv.make_url("/identity")), "u", "p", "u") as c:
+            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["94.103"], 1,
+                              max_attempts=0, parallel=1, active_timeout=30, boot_volume_gb=10, port_parallel=1,
+                              check_url=config.check_url, block_stats={"94.103.80": [0, 3]})
+            orig = checker.check_server
+
+            async def passes(ip, url, **kw):
+                return True, ""
+            checker.check_server = passes
+            try:
+                await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+            finally:
+                checker.check_server = orig
+        assert [k.ipv4[0] for k in job.kept] == ["94.103.81.5"] and job.skipped_bad == 1
+        assert len(st["servers"]) == 1, "no server was bought on the bad block's IP"
+    finally:
+        await srv.close()
+
+
 async def scenario():
     object.__setattr__(config, "db_path", tempfile.mkdtemp() + "/t.db")
     object.__setattr__(config, "admin_ids", {UID})
@@ -212,8 +271,60 @@ async def scenario():
         await purchase_scenario(port)
     finally:
         server.close()
+    server2, port2, _ = await start_ssh(sshkey.bot_key()[1])
+    try:
+        await learning_scenario(port2)
+    finally:
+        server2.close()
+    await ports_learning_scenario()
     await ports_scenario()
     await ui_scenario()
+    await picker_scenario()
+
+
+async def picker_scenario():
+    """Learned results show up when picking subnets; the speed choice reaches the purchase."""
+    s = FakeSession()
+    bot = Bot("1:x", session=s)
+    dp = Dispatcher()
+    for r in (access.router, menu.router, accounts.router, servers.router, buy.router, update.router):
+        r._parent_router = None
+    dp.include_routers(access.router, menu.router, accounts.router, servers.router, buy.router, update.router)
+    ctx = dp.fsm.get_context(bot, UID, UID)
+    from bot.providers import digitalocean as do_mod
+    do_mod_geo = do_mod.config.do_geofeed_url
+    from aiohttp import web
+    app = web.Application()
+    app.router.add_get("/geo", lambda r: web.Response(text="142.93.96.0/20,DE,DE-HE,Frankfurt,\n164.92.160.0/20,DE,DE-HE,Frankfurt,\n"))
+    srv = TestServer(app)
+    await srv.start_server()
+    object.__setattr__(config, "do_geofeed_url", str(srv.make_url("/geo")))
+    from bot.providers import geofeed
+    geofeed._CACHE.clear()
+    do_mod._GEOFEED = None
+    try:
+        acc = await db.add_account(UID, "digitalocean", "me", "t", "")
+        await ctx.set_data({"provider": "digitalocean", "account_id": acc, "regions": ["fra1"],
+                            "region_labels": {"fra1": "🇩🇪 Франкфурт · fra1"}})
+        await dp.feed_update(bot, cb_update(1, "buy:reg:0"))
+        groups = s.texts()[-1]
+        assert "🟢 <code>142.93.#.#</code>" in groups and "🟢 рабочих 1" in groups, groups
+        last = next(c for c in reversed(s.calls) if getattr(c, "reply_markup", None))
+        assert "🟢 Выбрать рабочие" in [b.text for row in last.reply_markup.inline_keyboard for b in row]
+        await dp.feed_update(bot, cb_update(2, "buy:ipwork"))
+        data = await ctx.get_data()
+        assert [data["pools"][i]["prefix"] for i in data["selected"]] == ["142.93.96.0/20"]
+        await dp.feed_update(bot, cb_update(3, "buy:ipg:142.93"))
+        assert "🟢 рабочих 1 · 🚫" not in s.texts()[-1] and "🟢 рабочих 1" in s.texts()[-1]
+        # speed choice on the order summary
+        await ctx.update_data(prefixes=["142.93.96.0/20"], count=1, image={"id": "u", "name": "Ubuntu"},
+                              flavor={"id": "s", "name": "s", "vcpus": 1, "ram_mb": 1024, "disk_gb": 25, "price": ""})
+        await dp.feed_update(bot, cb_update(4, "buy:par:10"))
+        assert "⚡ <b>Скорость:</b> 10 серверов одновременно" in s.texts()[-1]
+        assert (await ctx.get_data())["parallel"] == 10
+    finally:
+        await srv.close()
+        object.__setattr__(config, "do_geofeed_url", do_mod_geo)
 
 
 def test_working_check():
