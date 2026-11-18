@@ -83,7 +83,7 @@ async def checker_scenario(port):
 
 async def purchase_scenario(port):
     digitalocean.asyncio.sleep = lambda s: ORIG_SLEEP(0)
-    app, st = do_t.make_app([("164.92.170.5", "255.255.240.0"), ("165.22.1.9", "255.255.240.0"),
+    app, st = do_t.make_app([("164.92.170.5", "255.255.240.0"), ("142.93.100.1", "255.255.240.0"),
                              ("142.93.99.1", "255.255.240.0")])
     st["limit"] = 100
     keys = []
@@ -101,7 +101,8 @@ async def purchase_scenario(port):
     found = []
     try:
         async with DigitalOceanClient(do_t.TOKEN, str(srv.make_url("/v2"))) as c:
-            job = PurchaseJob("fra1", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64", None, [], 1,
+            job = PurchaseJob("fra1", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64", None,
+                              ["142.93.96.0/20"], 1,
                               max_attempts=0, parallel=1, active_timeout=30, boot_volume_gb=10,
                               check_url=config.check_url, bot_key=sshkey.bot_key(), check_timeout=20)
 
@@ -111,8 +112,10 @@ async def purchase_scenario(port):
             await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
         print("\n".join(job.log))
         assert found == ["142.93.99.1"] and [k.ipv4[0] for k in job.kept] == ["142.93.99.1"]
-        assert sorted(st["deleted"]) == [9000, 9001], "servers where the site did not open are deleted"
-        assert job.checked == 3
+        assert sorted(st["deleted"]) == [9000, 9001]
+        assert job.checked == 2, "the wrong-IP server is deleted without a check, only subnet matches are checked"
+        assert any("164.92.170.5</code> — не тот IP, удалён" in line for line in job.log)
+        assert any("142.93.100.1</code> — не прошёл проверку, удалён" in line for line in job.log)
         assert any("проверка пройдена, сервер рабочий" in line for line in job.log)
         assert any("не прошёл проверку, удалён" in line for line in job.log)
         secret = ("turkmen", "ssh", "curl", "сайт", "страниц")
@@ -139,41 +142,61 @@ async def ui_scenario():
         return [b.text for row in last.reply_markup.inline_keyboard for b in row]
 
     await dp.feed_update(bot, cb_update(1, "buy"))
-    assert "Как будем искать сервер" in s.texts()[-1] and "присылает только рабочие" in s.texts()[-1]
-    assert markup()[:2] == ["🎯 По подсетям", "✅ Только рабочий"]
-    await dp.feed_update(bot, cb_update(2, "buy:mode:check"))
-    assert "✅ Только рабочий сервер" in s.texts()[-1] and "Шаг 1." in s.texts()[-1]
-    assert (await ctx.get_data())["buy_mode"] == "check"
+    assert "Шаг 1.</b> Выберите провайдера" in s.texts()[-1], "no separate mode screen any more"
 
-    # region → straight to the count (no subnet step), numbering continues 1, 2, 3 …
     acc = await db.add_account(UID, "selectel", "me", "t", "")
     await ctx.update_data(provider="selectel", account_id=acc, regions=["spb0"],
                           region_labels={"spb0": "🇷🇺 Санкт-Петербург · spb0"})
     object.__setattr__(config, "selectel_api_url", "http://127.0.0.1:9")  # ip_pools fails → still fine
     await dp.feed_update(bot, cb_update(3, "buy:reg:0"))
+    assert "Шаг 3." in s.texts()[-1] and "🌐 Любой IP" in markup()
+    await dp.feed_update(bot, cb_update(4, "buy:ipany"))
     count = s.texts()[-1]
-    assert "Шаг 3.</b> Сколько рабочих серверов нужно" in count, count
+    assert "Шаг 4.</b> Сколько серверов нужно" in count and "любой IP" in count and "Только рабочие" in count, count
     data = await ctx.get_data()
     assert data["prefixes"] == [] and data["network_id"] is None
 
     await ctx.update_data(count=2, flavor={"id": "small", "name": "small", "vcpus": 1, "ram_mb": 512, "disk_gb": 20,
                                            "price": ""}, has_netplan=False,
                           images=[{"id": "ubuntu", "name": "🟠 Ubuntu 22.04"}])
-    await dp.feed_update(bot, cb_update(4, "buy:img:0"))
-    assert "Шаг 6.</b> Как входить на сервер" in s.texts()[-1], s.texts()[-1]  # 1 провайдер … 5 ОС, 6 доступ
-    await dp.feed_update(bot, cb_update(5, "buy:auth:pw"))
+    await dp.feed_update(bot, cb_update(5, "buy:img:0"))
+    assert "Шаг 7.</b> Как входить на сервер" in s.texts()[-1], s.texts()[-1]  # 1 … 3 IP, 4 кол-во, 5 тариф, 6 ОС
+    await dp.feed_update(bot, cb_update(6, "buy:auth:pw"))
     confirm = s.texts()[-1]
     print("\n" + confirm)
-    assert "✅ Способ: <b>только рабочие серверы</b>" in confirm and "Ищем IP" not in confirm
+    assert "🎯 Ищем IP: 🌐 <b>любой IP</b>" in confirm and "✅ Только рабочие" in confirm
     shown = "\n".join(s.texts()).lower()
     for word in ("turkmen", "curl", "сайт", "по ssh", "открывается"):
         assert word not in shown, f"the check method leaks into the bot texts: {word}"
+    assert buy._step({"has_netplan": True}, "os") == 7 and buy._step({}, "count") == 4
 
-    # subnet mode keeps the old numbering with the IP step
-    await dp.feed_update(bot, cb_update(6, "buy:mode:subnets"))
-    data = await ctx.get_data()
-    assert buy._step(data, "count") == 4 and buy._step({**data, "has_netplan": True}, "os") == 7
-    assert buy._step({"buy_mode": "check"}, "os") == 5
+
+async def ports_scenario():
+    """HostVDS fast mode + check: a port IP whose server fails the check → the hunt goes on."""
+    from bot.providers.hostvds import HostVDSClient
+    from tests import test_purchase as hv_t
+    app, st = hv_t.make_port_app([f"94.103.80.{i}" for i in (11, 12)] + [f"123.45.0.{i}" for i in range(10, 60)])
+    srv = TestServer(app)
+    await srv.start_server()
+    calls = []
+
+    async def fake_check(ip, url, password=None, key_file=None, ssh_timeout=300):
+        calls.append(ip)
+        return (ip == "94.103.80.12", "" if ip == "94.103.80.12" else "nope")
+    orig = checker.check_server
+    checker.check_server = fake_check
+    try:
+        async with HostVDSClient(str(srv.make_url("/identity")), "u", "p", "u") as c:
+            job = PurchaseJob("eu-west2", Flavor("f", "f", 1, 1024, 10), "img", "pub", ["94.103.80"], 1,
+                              max_attempts=0, parallel=1, active_timeout=30, boot_volume_gb=10, port_parallel=1,
+                              check_url=config.check_url)
+            await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+        print("\n".join(job.log))
+        assert calls == ["94.103.80.11", "94.103.80.12"], calls
+        assert [k.ipv4[0] for k in job.kept] == ["94.103.80.12"] and job.deleted == 1
+    finally:
+        checker.check_server = orig
+        await srv.close()
 
 
 async def scenario():
@@ -189,6 +212,7 @@ async def scenario():
         await purchase_scenario(port)
     finally:
         server.close()
+    await ports_scenario()
     await ui_scenario()
 
 

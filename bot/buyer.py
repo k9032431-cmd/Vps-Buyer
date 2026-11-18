@@ -129,7 +129,7 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
     good: list[tuple[str, str]] = []
     held: list[str] = []
     try:
-        while len(good) < job.count and job.ports_checked < job.max_port_attempts and not job.cancelled:
+        while len(good) < job.count - len(job.kept) and job.ports_checked < job.max_port_attempts and not job.cancelled:
             batch = min(job.port_parallel, job.max_port_attempts - job.ports_checked)
             first = job.ports_checked == 0
             targets = _port_targets(job)
@@ -147,7 +147,7 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 port_id, ip = r
                 if ip:
                     job.seen.append(ip)
-                if ip and ip_matches(ip, job.prefixes) and len(good) < job.count:
+                if ip and ip_matches(ip, job.prefixes) and len(good) < job.count - len(job.kept):
                     good.append((port_id, ip))
                     job.log.append(f"🎯 {_code(ip)} — нашёлся, покупаю сервер")
                 else:
@@ -172,21 +172,30 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
     try:
         srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id,
                                          job.boot_volume_gb, port_id=port_id, metadata=job.metadata,
-                                         ssh_key=job.ssh_key)
+                                         ssh_key=job.ssh_key, extra_keys=[job.bot_key[1]] if job.bot_key else None)
     except BaseException:
         await client.delete_port(job.region, port_id)
         raise
     state = await client.wait_active(job.region, srv.id, job.active_timeout)
+    reason = f"не запустился ({state.status})"
     if state.status == "ACTIVE":
         state.admin_pass = state.admin_pass or srv.admin_pass
         state.ipv4 = [ip] + [x for x in state.ipv4 if x != ip]
-        job.log.append(f"✅ {_code(ip)} — сервер готов")
-        await _finalize(client, job, state)
-        await _found(job, state)
-        return
+        works = True
+        if job.check_url:
+            job.log.append(f"🔎 {_code(ip)} — проверяю…")
+            works, _why = await _check(client, job, state, ip)
+            reason = "не прошёл проверку"
+        if works and not job.cancelled:
+            job.log.append(f"✅ {_code(ip)} — " + ("проверка пройдена, сервер рабочий" if job.check_url
+                                                  else "сервер готов"))
+            if not state.finalized:
+                await _finalize(client, job, state)
+            await _found(job, state)
+            return
     await client.delete_server(job.region, srv.id)  # also releases the port
     job.deleted += 1
-    job.log.append(f"⚠️ {_code(ip)} — сервер не запустился ({state.status}), удалён")
+    job.log.append(f"🗑 {_code(ip)} — {reason}, удалён")
 
 
 # ---------------- fallback mode: servers ----------------
@@ -253,15 +262,22 @@ async def run_purchase(client, job: PurchaseJob,
                        on_progress: Callable[[PurchaseJob], Awaitable[None]]) -> PurchaseJob:
     if getattr(client, "supports_ports", False) and _port_targets(job) and job.prefixes:
         job.mode = "ports"
-        good = await _hunt_ports(client, job, on_progress)
-        if good is None:
-            job.log.append("ℹ️ Быстрый подбор через порты недоступен — подбираю через серверы")
-        else:
+        # rounds: hunt IPs on free ports → buy servers on them → (check) — until enough servers are kept
+        while len(job.kept) < job.count and not job.cancelled and not job.error:
+            good = await _hunt_ports(client, job, on_progress)
+            if good is None:  # ports are not allowed for this account (first round only)
+                job.log.append("ℹ️ Быстрый подбор через порты недоступен — подбираю через серверы")
+                job.mode = "servers"
+                break
+            if not good:  # port limit reached or stopped
+                break
             results = await asyncio.gather(*(_server_on_port(client, job, p, ip) for p, ip in good),
                                            return_exceptions=True)
             for r in results:
                 if isinstance(r, BaseException):
                     _note_error(job, r)
+            await on_progress(job)
+        if job.mode == "ports":
             await on_progress(job)
             return job
 

@@ -113,7 +113,7 @@ async def scenario():
         failed = []
 
         async def flaky(bot_, method, timeout=None):
-            if isinstance(method, SendMessage) and method.text.startswith("🎉") and not failed:
+            if isinstance(method, SendMessage) and method.text.startswith("✅ <b>Рабочий сервер!</b>") and not failed:
                 failed.append(1)
                 raise TelegramNetworkError(method=method, message="connection reset")
             return await real_request(bot_, method, timeout)
@@ -127,7 +127,7 @@ async def scenario():
         finally:
             buy.run_purchase = orig
         texts = s.texts()
-        found_msgs = [t for t in texts if t.startswith("🎉 <b>Нашёлся IP!</b>")]
+        found_msgs = [t for t in texts if t.startswith("✅ <b>Рабочий сервер!</b>")]
         assert failed == [1], "a send failure was simulated"
         assert len(found_msgs) == 2 and "<code>95.182.87.5</code>" in found_msgs[0] and "(1/2)" in found_msgs[0]
         assert "🔑 <code>pw0</code>" in found_msgs[0] and "<code>ssh root@95.182.87.5</code>" in found_msgs[0]

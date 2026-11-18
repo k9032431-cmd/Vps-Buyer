@@ -68,29 +68,15 @@ async def _error(cb: CallbackQuery, e: Exception):
 
 # ---------- 1. provider ----------
 @router.callback_query(F.data == "buy")
-async def choose_mode(cb: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data.startswith("buy:mode:"))  # buttons from the earlier two-mode screen
+async def choose_provider(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     if cb.from_user.id in running_jobs():
         await cb.answer("⏳ Уже идёт покупка — дождитесь окончания или остановите её.", show_alert=True)
         return
-    await cb.message.edit_text(
-        "🛒 <b>Покупка сервера</b>\n\nКак будем искать сервер? 👇\n\n"
-        "🎯 <b>По подсетям</b> — вы выбираете подсети, бот покупает сервер с IP из них.\n\n"
-        "✅ <b>Только рабочий</b> — бот проверяет каждый новый сервер и присылает только рабочие.",
-        reply_markup=kb([Btn(text="🎯 По подсетям", callback_data="buy:mode:subnets")],
-                        [Btn(text="✅ Только рабочий", callback_data="buy:mode:check")],
-                        back("menu", "🏠 Главное меню")))
-    await cb.answer()
-
-
-@router.callback_query(F.data.startswith("buy:mode:"))
-async def choose_provider(cb: CallbackQuery, state: FSMContext):
-    mode = cb.data.split(":")[2]
-    await state.update_data(buy_mode=mode)
     rows = [[Btn(text=f"☁️ {name}", callback_data=f"buy:prov:{key}")] for key, name in PROVIDERS.items()]
-    title = "✅ Только рабочий сервер" if mode == "check" else "🎯 Сервер по подсетям"
-    await cb.message.edit_text(f"🛒 <b>{title}</b>\n\n<b>Шаг 1.</b> Выберите провайдера 👇",
-                               reply_markup=kb(*rows, back("buy", "⬅️ Назад")))
+    await cb.message.edit_text("🛒 <b>Покупка сервера</b>\n\n<b>Шаг 1.</b> Выберите провайдера 👇",
+                               reply_markup=kb(*rows, back("menu", "🏠 Главное меню")))
     await cb.answer()
 
 
@@ -173,12 +159,10 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     if "regions" not in data:  # e.g. a button from an old message after the menu was opened
         await cb.answer("🔁 Начните покупку заново", show_alert=True)
-        return await choose_mode(cb, state)
+        return await choose_provider(cb, state)
     region = data["regions"][int(cb.data.split(":")[2])]
     label = data["region_labels"][region]
     await state.update_data(region=region, region_label=label)
-    if data.get("buy_mode") == "check":
-        return await _skip_ip_step(cb, state, region)
     await cb.message.edit_text(f"⏳ Смотрю свободные IP в <b>{hd.quote(label)}</b>…")
     await cb.answer()
     try:
@@ -200,8 +184,14 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     await render_ip_screen(cb.message, state, edit=True)
 
 
+@router.callback_query(F.data == "buy:ipany")
+async def ip_any(cb: CallbackQuery, state: FSMContext):
+    await cb.message.edit_text("⏳ Готовлю покупку…")
+    await _skip_ip_step(cb, state, (await state.get_data())["region"])
+
+
 async def _skip_ip_step(cb: CallbackQuery, state: FSMContext, region: str):
-    """"Only working" mode: any IP will do. For OpenStack (HostVDS) still pick a public network with free IPs."""
+    """Any IP will do. For OpenStack (HostVDS) still pick a public network with free IPs."""
     await cb.answer()
     network_id = None
     try:
@@ -254,10 +244,13 @@ def _attempts_text() -> str:
     return f"максимум {config.max_attempts} созданий" if config.max_attempts > 0 else "без лимита попыток"
 
 
+def _wanted(prefixes: list[str]) -> str:
+    return prefixes_text(prefixes) if prefixes else "🌐 <b>любой IP</b>"
+
+
 def _step(data: dict, name: str) -> int:
-    """Number of a step in the flow actually shown (no IP step in "only working" mode, network plan only
-    when the tariff has one)."""
-    order = ["provider", "region"] + ([] if data.get("buy_mode") == "check" else ["ip"]) + ["count", "tariff"]
+    """Number of a step in the flow actually shown (network plan only when the tariff has one)."""
+    order = ["provider", "region", "ip", "count", "tariff"]
     order += (["netplan"] if data.get("has_netplan") else []) + ["os", "access"]
     return order.index(name) + 1
 
@@ -318,6 +311,7 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
         rows = grid(buttons, 2)
         if any(hits.values()):
             rows.append([Btn(text="⭐ Выбрать выпадавшие", callback_data="buy:iphits")])
+        rows.append([Btn(text="🌐 Любой IP", callback_data="buy:ipany")])
         rows.append([Btn(text="✏️ Своя подсеть", callback_data="buy:ip:custom"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
     else:
@@ -402,7 +396,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
     if len(shown) > 1:
         rows.append([Btn(text="☑️ Выбрать все", callback_data="buy:ipall"),
                      Btn(text="🔄 Сбросить", callback_data="buy:ipclr")])
-    rows.append([Btn(text="✏️ Свой IP", callback_data="buy:ip:custom")])
+    rows.append([Btn(text="✏️ Свой IP", callback_data="buy:ip:custom"),
+                 Btn(text="🌐 Любой IP", callback_data="buy:ipany")])
     if data.get("provider") in SCOUT_PROVIDERS:
         rows.append([Btn(text="🔍 Разведать доступные IP", callback_data="buy:scan")])
     if total:
@@ -552,14 +547,10 @@ def prefixes_text(prefixes: list[str], limit: int = 20) -> str:
 async def ask_count(message: Message, state: FSMContext, edit: bool = False):
     await state.set_state(Buy.count)
     data = await state.get_data()
-    if data.get("buy_mode") == "check":
-        text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько рабочих серверов нужно?\n\n"
-                "✅ Бот пришлёт только серверы, прошедшие проверку.\n\n"
-                "💡 Нажмите кнопку или отправьте число.")
-    else:
-        text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько серверов купить?\n\n"
-                f"🎯 Ищем: {prefixes_text(data['prefixes'])}\n\n"
-                "💡 Это общее число серверов с любым из выбранных IP. Нажмите кнопку или отправьте число.")
+    text = (f"🔢 <b>Шаг {_step(data, 'count')}.</b> Сколько серверов нужно?\n\n"
+            f"🎯 Ищем: {_wanted(data['prefixes'])}\n"
+            + ("✅ Только рабочие — каждый сервер проверяется\n" if config.check_url else "")
+            + "\n💡 Нажмите кнопку или отправьте число.")
     buttons = [Btn(text=str(n), callback_data=f"buy:cnt:{n}") for n in (1, 2, 3, 5, 10)]
     markup = kb(buttons, back("buy", "❌ Отмена"))
     if edit:
@@ -811,8 +802,7 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
         "🧾 <b>Проверьте заказ</b>\n",
         f"☁️ Провайдер: <b>{PROVIDERS[data['provider']]}</b>",
         f"📍 Локация: <b>{hd.quote(data['region_label'])}</b>",
-        ("✅ Способ: <b>только рабочие серверы</b>" if data.get("buy_mode") == "check"
-         else f"🎯 Ищем IP: {prefixes_text(data['prefixes'])}"),
+        f"🎯 Ищем IP: {_wanted(data['prefixes'])}",
         f"⚙️ Тариф: <b>{hd.quote(f['name'])}</b> · {f['vcpus']} vCPU · {f['ram_mb'] / 1024:g} GB"
         + (f" · {f['price']}" if f.get("price") else ""),
     ]
@@ -835,12 +825,11 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
-    if data.get("buy_mode") == "check":
-        lines.append(f"🔎 Каждый новый сервер проверяется, не прошедшие проверку удаляются ({_attempts_text()}). "
-                     "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
-    else:
-        lines.append(f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). "
-                     "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
+    lines.append("✅ Только рабочие: каждый подходящий сервер проверяется, не прошедшие проверку удаляются.\n"
+                 if config.check_url else "")
+    lines.append((f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). " if data["prefixes"]
+                  else f"💸 Подбор {_attempts_text()}. ")
+                 + "Каждое создание может стоить денег — остановить можно кнопкой ⛔.")
     text = "\n".join(lines)
     await _send(msg, text, kb([Btn(text="🚀 Купить", callback_data="buy:go")], back("buy", "❌ Отмена")), edit)
 
@@ -849,11 +838,9 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
 def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str:
     head = "🏁 <b>Покупка завершена</b>" if done else "⏳ <b>Идёт покупка…</b>"
     text = f"{head}\n\n📍 {hd.quote(label or job.region)}\n"
+    text += f"🎯 Ищем: {prefixes_text(job.prefixes, 10) if job.prefixes else '🌐 любой IP'}\n"
     if job.check_url:
-        text += "✅ Ищем: <b>рабочие серверы</b>\n"
         text += f"🔎 Проверено: <b>{job.checked}</b>\n"
-    else:
-        text += f"🎯 Ищем: {prefixes_text(job.prefixes, 10)}\n"
     if job.mode == "ports":
         text += f"⚡ Проверено IP (бесплатно): <b>{job.ports_checked}</b>\n"
     text += (f"✅ Готово: <b>{len(job.kept)}/{job.count}</b>   "
@@ -912,7 +899,7 @@ async def go(cb: CallbackQuery, state: FSMContext, bot: Bot):
     key = await db.get_ssh_key(uid, data["ssh_key_id"]) if data.get("ssh_key_id") else None
     if key and data["provider"] in SSH_KEY_PROVIDERS:
         job.ssh_key, job.ssh_key_name = key[2], key[1]
-    if data.get("buy_mode") == "check":
+    if config.check_url:  # every purchase: matching servers are checked before they are sent
         job.check_url, job.check_timeout = config.check_url, config.check_ssh_timeout
         if data["provider"] in SSH_KEY_PROVIDERS:
             job.bot_key = sshkey.bot_key()  # the bot's own key rides along so it can log in and check
