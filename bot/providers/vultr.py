@@ -8,6 +8,7 @@ A reserved IP costs $0.004/hour; a deleted one still counts toward the reserved 
 when the quota runs out the purchase goes on with servers (see buyer.RESERVE_NO_MATCH / switch_reason)."""
 import asyncio
 import base64
+import logging
 import time
 
 import aiohttp
@@ -16,7 +17,9 @@ from ..config import config
 from . import geofeed
 from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, ssh_key_script
 
+log = logging.getLogger(__name__)
 API_URL = "https://api.vultr.com/v2"
+RELEASE_TIMEOUT = 300  # how long to keep trying to release a reserved IP of a deleted instance
 
 # region id → cities as written in Vultr's geofeed
 GEO_CITIES = {
@@ -44,12 +47,15 @@ class VultrClient:
         self._session: aiohttp.ClientSession | None = None
         self._regions: dict[str, dict] | None = None
         self._keys: dict[str, str] = {}
+        self._cleanup: set[asyncio.Task] = set()  # reserved IPs waiting for their instance to be gone
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
         return self
 
     async def __aexit__(self, *exc):
+        if self._cleanup:  # let reserved IPs of deleted instances be released before closing
+            await asyncio.wait(self._cleanup, timeout=RELEASE_TIMEOUT + 30)
         if self._session:
             await self._session.close()
 
@@ -70,8 +76,10 @@ class VultrClient:
                     if r.status == 401:
                         msg = f"неверный API-ключ ({msg})"
                     elif (method == "POST" and path == "/instances" and status in (400, 403, 412)
-                          and any(w in str(msg).lower() for w in ("limit", "maximum", "quota"))):
-                        status = 429  # account instance / cost limit: our deletions free it up — wait, don't stop
+                          and any(w in str(msg).lower() for w in ("limit", "maximum", "quota", "not available"))):
+                        # account instance / cost limit (our deletions free it up) or the plan is out of
+                        # stock in this location for a moment — wait, don't stop
+                        status = 429
                     raise ProviderError(f"Vultr {method} {path} → {r.status}: {msg or r.reason}", status)
                 return body
 
@@ -111,6 +119,12 @@ class VultrClient:
     # ---------- plans / images ----------
     async def list_flavors(self, region: str) -> list[Flavor]:
         plans = [p for p in await self._all("/plans", "plans") if region in p.get("locations", [])]
+        try:  # plans sold out in this location right now are listed but cannot be bought
+            avail = set((await self._request("GET", f"/regions/{region}/availability")).get("available_plans") or [])
+        except Exception:
+            avail = set()
+        if avail:
+            plans = [p for p in plans if p["id"] in avail]
         plans.sort(key=lambda p: p.get("monthly_cost", 0))
         return [Flavor(p["id"], p["id"], int(p.get("vcpu_count") or 0), int(p.get("ram") or 0),
                        int(p.get("disk") or 0),
@@ -204,7 +218,29 @@ class VultrClient:
             if e.status != 404:
                 raise
         for rid in reserved:  # a reserved IP outlives its instance (and keeps being billed) — remove it
-            await self.delete_port(region, rid)
+            task = asyncio.ensure_future(self._release(rid))
+            self._cleanup.add(task)
+            task.add_done_callback(self._cleanup.discard)
+
+    async def _release(self, rid: str) -> None:
+        """Vultr refuses to delete a reserved IP while the instance using it as main IP is still being
+        destroyed ("The server must be closed…") — keep trying for a few minutes in the background."""
+        deadline = time.time() + RELEASE_TIMEOUT
+        while True:
+            try:
+                await self._request("DELETE", f"/reserved-ips/{rid}")
+                return
+            except ProviderError as e:
+                if e.status == 404:
+                    return
+                if time.time() > deadline:
+                    log.error("reserved IP %s was not released: %s", rid, e)
+                    return
+            except Exception:
+                log.exception("releasing reserved IP %s", rid)
+                if time.time() > deadline:
+                    return
+            await asyncio.sleep(10)
 
     async def wait_ip(self, region: str, server_id: str, timeout: int) -> Server:
         return await self._wait(server_id, timeout, need_active=False)

@@ -138,7 +138,7 @@ async def hetzner_scenario():
 # ---------------- Vultr ----------------
 def vultr_app(ips):
     ips = itertools.cycle(ips)
-    st = {"rips": {}, "deleted_rips": [], "instances": {}, "deleted": [], "created": []}
+    st = {"rips": {}, "deleted_rips": [], "instances": {}, "deleted": [], "created": [], "busy": {}}
     a = web.Application()
     a.router.add_get("/geo", lambda r: web.Response(text=GEO))
     a.router.add_get("/v2/account", lambda r: ok({"account": {"email": "me@x.io", "balance": -12.5, "pending_charges": 2.5}}))
@@ -148,6 +148,8 @@ def vultr_app(ips):
     a.router.add_get("/v2/plans", lambda r: ok({"plans": [
         {"id": "vc2-1c-1gb", "vcpu_count": 1, "ram": 1024, "disk": 25, "monthly_cost": 5, "locations": ["ewr", "fra"]}],
         "meta": {"links": {"next": ""}}}))
+    a.router.add_get("/v2/regions/ewr/availability", lambda r: ok({"available_plans": ["vc2-1c-1gb"]}))
+    a.router.add_get("/v2/regions/fra/availability", lambda r: ok({"available_plans": ["vc2-2c-4gb"]}))
     a.router.add_get("/v2/os", lambda r: ok({"os": [{"id": 2284, "name": "Ubuntu 24.04 LTS x64", "arch": "x64", "family": "ubuntu"},
                                                     {"id": 501, "name": "Windows 2022", "arch": "x64", "family": "windows"}],
                                              "meta": {"links": {"next": ""}}}))
@@ -164,7 +166,12 @@ def vultr_app(ips):
     a.router.add_route("*", "/v2/reserved-ips", rips)
 
     async def del_rip(req):
-        st["deleted_rips"].append(req.match_info["id"])
+        rid = req.match_info["id"]
+        if st["rips"][rid]["instance_id"] and st["busy"].get(rid, 0) < 2:  # instance still being destroyed
+            st["busy"][rid] = st["busy"].get(rid, 0) + 1
+            return ok({"error": "The server must be closed to detach this IP because it is being used as the "
+                                "main IP.", "status": 400}, 400)
+        st["deleted_rips"].append(rid)
         return web.Response(status=204)
     a.router.add_delete("/v2/reserved-ips/{id}", del_rip)
     a.router.add_route("*", "/v2/ssh-keys", lambda r: ok({"ssh_keys": [], "meta": {"links": {"next": ""}}})
@@ -203,15 +210,18 @@ async def vultr_scenario():
             assert [p.prefix for p in await c.ip_pools("ewr")] == ["45.32.0.0/21"], "Piscataway = New Jersey"
             assert [i.id for i in await c.list_images("ewr")] == ["2284"]
             fl = (await c.list_flavors("ewr"))[0]
+            assert await c.list_flavors("fra") == [], "a plan sold out in the location is not offered"
             job = PurchaseJob("ewr", fl, "2284", None, ["45.32.0.0/21"], 1, max_attempts=0, parallel=1,
                               active_timeout=10, boot_volume_gb=10, port_parallel=3)
             await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
             assert [k.ipv4[0] for k in job.kept] == ["45.32.3.3"] and job.kept[0].admin_pass == "V#ultr-pass"
             assert st["created"][0]["reserved_ipv4"] == "rip-1"
             assert set(st["deleted_rips"]) == set(st["rips"]) - {"rip-1"}, "unused reserved IPs released"
-            # deleting the instance also frees its reserved IP (it would keep being billed)
+            # deleting the instance also frees its reserved IP (it would keep being billed); Vultr refuses
+            # while the instance is still being destroyed — the bot keeps trying in the background
             await c.delete_server("ewr", job.kept[0].id)
-            assert st["deleted"] == ["i-0"] and st["deleted_rips"][-1] == "rip-1"
+            assert st["deleted"] == ["i-0"]
+        assert st["deleted_rips"][-1] == "rip-1" and st["busy"]["rip-1"] == 2
     finally:
         await srv.close()
 

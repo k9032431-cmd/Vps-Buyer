@@ -156,6 +156,17 @@ def _err(e: BaseException) -> str:
     return html.escape(str(e) or type(e).__name__)[:300]
 
 
+async def _delete(client, job: PurchaseJob, server_id: str, ip: str | None = None) -> None:
+    """Delete a server we do not keep; a failed delete is reported but never stops the purchase."""
+    try:
+        await client.delete_server(job.region, server_id)
+        job.deleted += 1
+    except Exception as e:
+        logging.getLogger(__name__).exception("delete failed for %s", server_id)
+        what = _code(ip) if ip else html.escape(server_id)
+        job.log.append(f"❗ {what} — не удалось удалить ({_err(e)[:150]}). Проверьте панель провайдера.")
+
+
 def _note_error(job: PurchaseJob, e: BaseException) -> None:
     job.log.append(f"⚠️ {_err(e)}")
     if isinstance(e, ProviderError) and _fatal(e.status):
@@ -248,6 +259,8 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
                 await asyncio.sleep(BUSY_WAIT)
                 continue
             await client.delete_port(job.region, port_id)
+            if busy:  # waited long enough: the account limit or the plan's stock is not freeing up
+                raise ProviderError(f"Провайдер так и не дал создать сервер: {e}", 400) from e
             raise
     state = await client.wait_active(job.region, srv.id, job.active_timeout)
     reason = f"не запустился ({state.status})"
@@ -266,8 +279,7 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
                 await _finalize(client, job, state)
             await _found(job, state)
             return
-    await client.delete_server(job.region, srv.id)  # also releases the port
-    job.deleted += 1
+    await _delete(client, job, srv.id, ip)  # also releases the port
     job.log.append(f"🗑 {_code(ip)} — {reason}, удалён")
 
 
@@ -330,11 +342,9 @@ async def _try_server(client, job: PurchaseJob) -> None:
             else:
                 reason = f"не запустился ({state.status})"
     except BaseException:
-        await client.delete_server(job.region, srv.id)
-        job.deleted += 1
+        await _delete(client, job, srv.id)
         raise
-    await client.delete_server(job.region, srv.id)
-    job.deleted += 1
+    await _delete(client, job, srv.id)
     ips = ", ".join(_code(ip) for ip in state.ipv4) or "без IP"
     job.log.append(f"🗑 {ips} — {html.escape(reason)}, удалён")
 
@@ -406,8 +416,9 @@ async def run_purchase(client, job: PurchaseJob,
             break
         busy_rounds = busy_rounds + 1 if busy and all(isinstance(r, BaseException) for r in results) else 0
         if busy_rounds >= BUSY_ROUNDS_LIMIT:
-            job.error = ("Лимит аккаунта: провайдер не даёт создать сервер. Удалите лишние серверы "
-                         "или попросите провайдера поднять лимит.")
+            job.error = ("Провайдер не даёт создать сервер (лимит аккаунта или тариф закончился в этой "
+                         "локации). Удалите лишние серверы, выберите другой тариф или попросите провайдера "
+                         "поднять лимит.")
             job.log.append(f"❗ {html.escape(job.error)}")
             break
         if busy:  # rate or capacity limit — give the provider a moment instead of hammering it

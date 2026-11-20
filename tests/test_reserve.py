@@ -125,7 +125,7 @@ async def server_mode_limit():
     c.supports_ports = False
     j = job([])
     await run_purchase(c, j, nothing)
-    assert j.error and "Лимит аккаунта" in j.error and not j.kept
+    assert j.error and "не даёт создать сервер" in j.error and not j.kept
 
 
 # ---------------- real clients against fake APIs ----------------
