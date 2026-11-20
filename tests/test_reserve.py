@@ -107,7 +107,7 @@ async def first_round_refused():
     j = job(["45.32.0.0/21"])
     await run_purchase(c, j, nothing)
     assert not j.error and [k.ipv4[0] for k in j.kept] == ["45.32.3.3"]
-    assert any("Резервные IP недоступны" in line for line in j.log)
+    assert any("Лимит резервных IP" in line for line in j.log)
 
 
 async def instance_limit():

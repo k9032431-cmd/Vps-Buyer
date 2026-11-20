@@ -25,6 +25,8 @@ NO_MATCH_HINT = 30  # attempts without a single match before the bot suggests ot
 # Reserved IPs (Vultr, Hetzner, Civo) may come from other ranges than servers: after this many reserved
 # IPs with none in the chosen subnets the bot goes on with servers instead.
 RESERVE_NO_MATCH = 50
+QUOTA_TEXT = ("Лимит резервных IP аккаунта исчерпан (удалённые IP провайдер считает ещё до 24 часов, "
+              "потом лимит освободится)")
 BUSY_WAIT = 15  # seconds between tries while the provider is busy or the account is at its limit
 BUSY_ROUNDS_LIMIT = 20  # server rounds in a row refused by an account limit before the purchase stops
 SERVER_BUSY_RETRIES = 12  # tries to build a server on a found IP while the account is at its limit
@@ -201,7 +203,9 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 return_exceptions=True)
             job.ports_checked += batch
             if first and all(isinstance(r, BaseException) for r in results):
-                job.switch_reason = ("Резервные IP недоступны для аккаунта" if reserve
+                quota = any(w in str(results[0]).lower() for w in ("maximum", "limit", "quota"))
+                job.switch_reason = (QUOTA_TEXT if reserve and quota else
+                                     "Резервные IP недоступны для аккаунта" if reserve
                                      else "Быстрый подбор через порты недоступен") + " — подбираю через серверы"
                 job.log.append(f"⚠️ {_err(results[0])}")
                 return None  # ports are not available for this account → buy servers instead
@@ -209,7 +213,7 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
             if reserve and refused:
                 # usually the account's reserved IP quota (on Vultr deleted IPs still count for 24 h)
                 job.log.append(f"⚠️ {_err(refused[0])}")
-                job.switch_reason = "Лимит резервных IP аккаунта исчерпан — дальше подбираю через серверы"
+                job.switch_reason = QUOTA_TEXT + " — дальше подбираю через серверы"
                 await asyncio.gather(*(client.delete_port(job.region, p) for p, _ in good), return_exceptions=True)
                 good.clear()
                 return None
