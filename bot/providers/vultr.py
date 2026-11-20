@@ -2,7 +2,10 @@
 
 Subnets: Vultr's geofeed (geofeed.constant.com) lists every subnet by city. Fast mode: a Reserved IP is
 created on its own (POST /reserved-ips), its address is known at once, and an instance created with
-reserved_ipv4 = its id gets it as the MAIN IP. Wrong reserved IPs are deleted right away."""
+reserved_ipv4 = its id gets it as the MAIN IP. Wrong reserved IPs are deleted right away — so servers are
+bought only for IPs from the chosen subnets (useful with an instance limit, e.g. a trial account).
+A reserved IP costs $0.004/hour; a deleted one still counts toward the reserved IP quota for 24 hours —
+when the quota runs out the purchase goes on with servers (see buyer.RESERVE_NO_MATCH / switch_reason)."""
 import asyncio
 import base64
 import time
@@ -63,9 +66,13 @@ class VultrClient:
                 body = await r.json(content_type=None) if r.content_length != 0 else None
                 if r.status >= 400:
                     msg = (body or {}).get("error") if isinstance(body, dict) else None
+                    status = r.status
                     if r.status == 401:
                         msg = f"неверный API-ключ ({msg})"
-                    raise ProviderError(f"Vultr {method} {path} → {r.status}: {msg or r.reason}", r.status)
+                    elif (method == "POST" and path == "/instances" and status in (400, 403, 412)
+                          and any(w in str(msg).lower() for w in ("limit", "maximum", "quota"))):
+                        status = 429  # account instance / cost limit: our deletions free it up — wait, don't stop
+                    raise ProviderError(f"Vultr {method} {path} → {r.status}: {msg or r.reason}", status)
                 return body
 
     async def _all(self, path: str, key: str, params: dict | None = None) -> list[dict]:

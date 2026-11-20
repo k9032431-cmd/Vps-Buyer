@@ -18,9 +18,9 @@ PROVIDERS = {"hostvds": "HostVDS", "digitalocean": "DigitalOcean", "hetzner": "H
 PROVIDER_NAMES = {**PROVIDERS, "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
                   "serverspace": "Serverspace"}
 # Providers without a subnet list: blocks are learned from servers and IP scouting.
-SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr"}
+SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr", "civo"}
 # Providers that reserve a standalone IP and build a server on it (fast, almost free IP hunting / scouting).
-RESERVE_PROVIDERS = {"hetzner", "vultr"}
+RESERVE_PROVIDERS = {"hetzner", "vultr", "civo"}
 # Providers connected with a single API token (stored in Account.password).
 TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean", "hetzner", "vultr", "linode", "civo"}
 # Providers whose full subnet list is known up front from a geofeed (prefixes are CIDRs, chosen by mask).

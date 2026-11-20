@@ -2,7 +2,12 @@
 
 Civo publishes no subnet list: IP blocks are learned from your servers and purchases ("Any IP" works too).
 Most calls take the region; an instance needs the region's default network and a disk image
-(template_id). The root password comes back as initial_password when no SSH key id is given."""
+(template_id). The root password comes back as initial_password when no SSH key id is given.
+
+Fast mode: a Reserved IP (POST /ips, field names checked against civo/civogo) is created on its own, its
+address is known at once, and an instance created with reserved_ipv4 = that address gets it as its public
+IP — so a server is bought only for IPs from the chosen blocks. A reserved IP outlives its instance, so
+delete_server removes it too."""
 import asyncio
 import time
 
@@ -16,12 +21,19 @@ CITIES = {"LON1": ("GB", "Лондон"), "NYC1": ("US", "Нью-Йорк"), "FR
 
 
 class CivoClient:
+    supports_ports = True     # "ports" here are Reserved IPs
+    reserves_ips = True
+    max_held_ports = 0
+    reserve_parallel = 2
+
     def __init__(self, token: str, api_url: str = API_URL):
         self.token = token.strip()
         self.api_url = api_url.rstrip("/")
         self._session: aiohttp.ClientSession | None = None
         self._keys: dict[str, str] = {}
         self._regions_of: dict[str, str] = {}   # instance id → region (GET/DELETE need it)
+        self._ips: dict[str, str] = {}          # reserved IP id → address
+        self._reserved_of: dict[str, str] = {}  # instance id → reserved IP id
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
@@ -42,14 +54,62 @@ class CivoClient:
                 body = await r.json(content_type=None) if r.content_length != 0 else None
                 if r.status >= 400:
                     msg = (body or {}).get("reason") or (body or {}).get("code") if isinstance(body, dict) else None
-                    if r.status in (401, 403):
+                    status = r.status
+                    if any(w in str(msg).lower() for w in ("quota", "limit")) and method == "POST":
+                        # out of instance quota: our deletions free it up — wait instead of stopping.
+                        # A reserved IP quota stays a client error, so the purchase goes on with servers.
+                        status = 429 if path == "/instances" else 403
+                    elif r.status in (401, 403):
                         msg = f"неверный API-ключ ({msg})"
-                    raise ProviderError(f"Civo {method} {path} → {r.status}: {msg or r.reason}", r.status)
+                    raise ProviderError(f"Civo {method} {path} → {r.status}: {msg or r.reason}", status)
                 return body
 
     async def check(self) -> str:
         q = await self._request("GET", "/quota")
         return f"квота инстансов: {q.get('instance_count_usage', 0)}/{q.get('instance_count_limit', '?')}"
+
+    async def free_slots(self) -> tuple[int, int]:
+        """(free, limit) instances by the account quota."""
+        q = await self._request("GET", "/quota")
+        limit = int(q.get("instance_count_limit") or 0)
+        if not limit:
+            return 10 ** 6, 10 ** 6
+        return limit - int(q.get("instance_count_usage") or 0), limit
+
+    # ---------- Reserved IPs (fast mode) ----------
+    async def create_port(self, region: str, network_id: str | None, subnet_id: str | None) -> tuple[str, str]:
+        rip = await self._request("POST", "/ips", {"name": "vps-buyer", "region": region})
+        ip = rip.get("ip")
+        if not ip:  # the address is sometimes filled in a moment later
+            for _ in range(5):
+                await asyncio.sleep(1)
+                ip = (await self._request("GET", f"/ips/{rip['id']}", params={"region": region})).get("ip")
+                if ip:
+                    break
+        self._ips[rip["id"]] = ip or ""
+        return rip["id"], ip
+
+    async def delete_port(self, region: str, port_id: str) -> None:
+        for attempt in range(6):
+            try:
+                await self._request("DELETE", f"/ips/{port_id}", params={"region": region} if region else None)
+                return
+            except ProviderError as e:
+                if e.status == 404:
+                    return
+                if attempt == 5:
+                    raise
+                await asyncio.sleep(5)  # still assigned to an instance that is being deleted
+
+    async def _reserved_for(self, region: str, server_id: str) -> list[str]:
+        if server_id in self._reserved_of:
+            return [self._reserved_of.pop(server_id)]
+        try:
+            data = await self._request("GET", "/ips", params={"region": region, "per_page": 200})
+        except ProviderError:
+            return []
+        items = data.get("items", []) if isinstance(data, dict) else (data or [])
+        return [i["id"] for i in items if str((i.get("assigned_to") or {}).get("id")) == str(server_id)]
 
     async def _instances(self, region: str) -> list[dict]:
         data = await self._request("GET", "/instances", params={"region": region, "per_page": 200})
@@ -126,6 +186,8 @@ class CivoClient:
             raise ProviderError("Civo: в регионе нет сети по умолчанию")
         body = {"hostname": name, "size": flavor.id, "region": region, "network_id": net["id"],
                 "template_id": image_id, "public_ip": "create", "initial_user": "root", "count": 1}
+        if port_id:  # build the server on the reserved IP we found
+            body["reserved_ipv4"] = self._ips.get(port_id) or port_id
         key_id = await self._key_id(ssh_key) if ssh_key else None
         if key_id:
             body["ssh_key_id"] = key_id
@@ -134,6 +196,8 @@ class CivoClient:
             body["script"] = ssh_key_script(rest)
         srv = self._server(await self._request("POST", "/instances", body))
         self._regions_of[srv.id] = region
+        if port_id:
+            self._reserved_of[srv.id] = port_id
         if ssh_key:
             srv.admin_pass = None
         return srv
@@ -144,11 +208,14 @@ class CivoClient:
 
     async def delete_server(self, region: str, server_id: str) -> None:
         region = region or self._regions_of.get(server_id, "")
+        reserved = await self._reserved_for(region, server_id)
         try:
             await self._request("DELETE", f"/instances/{server_id}", params={"region": region})
         except ProviderError as e:
             if e.status != 404:
                 raise
+        for rid in reserved:  # a reserved IP outlives its instance (and keeps being billed) — remove it
+            await self.delete_port(region, rid)
 
     async def wait_ip(self, region: str, server_id: str, timeout: int) -> Server:
         return await self._wait(region, server_id, timeout, need_active=False)

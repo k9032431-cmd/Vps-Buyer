@@ -22,6 +22,12 @@ MAX_BATCH = 10  # most servers created at once when the provider reports free ca
 SLOT_WAIT = 180  # seconds to wait for capacity freed by our own deletions
 START_SLOT_WAIT = 60  # same, before the first batch
 NO_MATCH_HINT = 30  # attempts without a single match before the bot suggests other subnets
+# Reserved IPs (Vultr, Hetzner, Civo) may come from other ranges than servers: after this many reserved
+# IPs with none in the chosen subnets the bot goes on with servers instead.
+RESERVE_NO_MATCH = 50
+BUSY_WAIT = 15  # seconds between tries while the provider is busy or the account is at its limit
+BUSY_ROUNDS_LIMIT = 20  # server rounds in a row refused by an account limit before the purchase stops
+SERVER_BUSY_RETRIES = 12  # tries to build a server on a found IP while the account is at its limit
 
 
 # Client errors (bad request, no money, quota, forbidden…) stop the job; 409/429 are transient.
@@ -56,13 +62,15 @@ class PurchaseJob:
     block_stats: dict = field(default_factory=dict)
     check_results: list = field(default_factory=list)  # (block, passed) found in this purchase
     skipped_bad: int = 0                         # servers / IPs dropped at once because their block fails
-    max_port_attempts: int = 500
+    max_port_attempts: int = 0   # 0 = no limit
     port_parallel: int = 10
     kept: list[Server] = field(default_factory=list)
     attempts: int = 0            # servers created
     deleted: int = 0             # servers deleted
     ports_checked: int = 0
     mode: str = ""               # "ports" | "servers"
+    port_matches: int = 0        # reserved IPs / ports that were in the chosen subnets
+    switch_reason: str = ""      # why IP hunting gave way to buying servers
     log: list[str] = field(default_factory=list)   # HTML-safe lines
     seen: list[str] = field(default_factory=list)  # every IP the provider gave us
     subnets: list[str] = field(default_factory=list)  # their subnets (CIDR), when the provider reports masks
@@ -161,9 +169,16 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
     held: list[str] = []
     held_limit = getattr(client, "max_held_ports", HELD_PORTS_LIMIT)
     parallel = min(job.port_parallel, getattr(client, "reserve_parallel", job.port_parallel))
+    reserve = getattr(client, "reserves_ips", False)
+    limited = job.max_port_attempts > 0
     try:
-        while len(good) < job.count - len(job.kept) and job.ports_checked < job.max_port_attempts and not job.cancelled:
-            batch = min(parallel, job.max_port_attempts - job.ports_checked)
+        while (len(good) < job.count - len(job.kept) and not job.cancelled
+               and (not limited or job.ports_checked < job.max_port_attempts)):
+            if reserve and not good and job.port_matches == 0 and job.ports_checked >= RESERVE_NO_MATCH:
+                job.switch_reason = (f"За {job.ports_checked} резервных IP ни одного из выбранных подсетей — "
+                                     "дальше подбираю через серверы")
+                return None
+            batch = parallel if not limited else min(parallel, job.max_port_attempts - job.ports_checked)
             first = job.ports_checked == 0
             targets = _reserve_targets(client, job)
             results = await asyncio.gather(
@@ -172,7 +187,18 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 return_exceptions=True)
             job.ports_checked += batch
             if first and all(isinstance(r, BaseException) for r in results):
+                job.switch_reason = ("Резервные IP недоступны для аккаунта" if reserve
+                                     else "Быстрый подбор через порты недоступен") + " — подбираю через серверы"
+                job.log.append(f"⚠️ {_err(results[0])}")
                 return None  # ports are not available for this account → buy servers instead
+            refused = [r for r in results if isinstance(r, ProviderError) and _fatal(r.status)]
+            if reserve and refused:
+                # usually the account's reserved IP quota (on Vultr deleted IPs still count for 24 h)
+                job.log.append(f"⚠️ {_err(refused[0])}")
+                job.switch_reason = "Лимит резервных IP аккаунта исчерпан — дальше подбираю через серверы"
+                await asyncio.gather(*(client.delete_port(job.region, p) for p, _ in good), return_exceptions=True)
+                good.clear()
+                return None
             for r in results:
                 if isinstance(r, BaseException):
                     _note_error(job, r)
@@ -180,8 +206,10 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 port_id, ip = r
                 if ip:
                     job.seen.append(ip)
-                if ip and block_is_bad(job, ip) and ip_matches(ip, job.prefixes):
-                    job.skipped_bad += 1
+                if ip and ip_matches(ip, job.prefixes):
+                    job.port_matches += 1
+                    if block_is_bad(job, ip):
+                        job.skipped_bad += 1
                 if (ip and ip_matches(ip, job.prefixes) and not block_is_bad(job, ip)
                         and len(good) < job.count - len(job.kept)):
                     good.append((port_id, ip))
@@ -205,13 +233,22 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
 async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> None:
     name = f"vps-{secrets.token_hex(3)}"
     job.attempts += 1
-    try:
-        srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id,
-                                         job.boot_volume_gb, port_id=port_id, metadata=job.metadata,
-                                         ssh_key=job.ssh_key, extra_keys=[job.bot_key[1]] if job.bot_key else None)
-    except BaseException:
-        await client.delete_port(job.region, port_id)
-        raise
+    for attempt in range(SERVER_BUSY_RETRIES):
+        try:
+            srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id,
+                                             job.boot_volume_gb, port_id=port_id, metadata=job.metadata,
+                                             ssh_key=job.ssh_key,
+                                             extra_keys=[job.bot_key[1]] if job.bot_key else None)
+            break
+        except BaseException as e:
+            busy = isinstance(e, ProviderError) and e.status == 429
+            if busy and attempt < SERVER_BUSY_RETRIES - 1 and not job.cancelled:
+                if attempt == 0:  # account limit: keep the good IP and wait for a free slot
+                    job.log.append(f"⏳ {_code(ip)} — лимит аккаунта, жду свободное место для сервера")
+                await asyncio.sleep(BUSY_WAIT)
+                continue
+            await client.delete_port(job.region, port_id)
+            raise
     state = await client.wait_active(job.region, srv.id, job.active_timeout)
     reason = f"не запустился ({state.status})"
     if state.status == "ACTIVE":
@@ -309,8 +346,8 @@ async def run_purchase(client, job: PurchaseJob,
         # rounds: hunt IPs on free ports → buy servers on them → (check) — until enough servers are kept
         while len(job.kept) < job.count and not job.cancelled and not job.error:
             good = await _hunt_ports(client, job, on_progress)
-            if good is None:  # ports are not allowed for this account (first round only)
-                job.log.append("ℹ️ Быстрый подбор через порты недоступен — подбираю через серверы")
+            if good is None:  # no reserved IPs / ports for this account, or they never hit the subnets
+                job.log.append(f"ℹ️ {html.escape(job.switch_reason or 'Подбираю через серверы')}")
                 job.mode = "servers"
                 break
             if not good:  # port limit reached or stopped
@@ -327,6 +364,7 @@ async def run_purchase(client, job: PurchaseJob,
 
     job.mode = "servers"
     unlimited = job.max_attempts <= 0
+    busy_rounds = 0
     while (len(job.kept) < job.count and (unlimited or job.attempts < job.max_attempts)
            and not job.cancelled):
         need = job.count - len(job.kept)
@@ -366,6 +404,12 @@ async def run_purchase(client, job: PurchaseJob,
         await on_progress(job)
         if job.error:
             break
+        busy_rounds = busy_rounds + 1 if busy and all(isinstance(r, BaseException) for r in results) else 0
+        if busy_rounds >= BUSY_ROUNDS_LIMIT:
+            job.error = ("Лимит аккаунта: провайдер не даёт создать сервер. Удалите лишние серверы "
+                         "или попросите провайдера поднять лимит.")
+            job.log.append(f"❗ {html.escape(job.error)}")
+            break
         if busy:  # rate or capacity limit — give the provider a moment instead of hammering it
-            await asyncio.sleep(15)
+            await asyncio.sleep(BUSY_WAIT)
     return job

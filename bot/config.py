@@ -39,8 +39,9 @@ class Config:
     # 0 = no limit (stop with the ⛔ button).
     # (old MAX_ATTEMPTS from earlier installs is ignored on purpose — it defaulted to 50)
     max_attempts: int = int(os.getenv("PURCHASE_ATTEMPT_LIMIT", "0"))
-    # Fast mode (HostVDS): max free port checks per job and how many at once.
-    max_port_attempts: int = int(os.getenv("MAX_PORT_ATTEMPTS", "500"))
+    # Fast mode (ports / reserved IPs): max IP checks per job (0 = no limit; the old MAX_PORT_ATTEMPTS
+    # is ignored on purpose) and how many at once.
+    max_port_attempts: int = int(os.getenv("IP_HUNT_LIMIT", "0"))
     port_parallel: int = int(os.getenv("PORT_PARALLEL", "10"))
     # "Only working" purchase: the page the bot opens from each new server over SSH
     check_url: str = os.getenv("CHECK_URL", "https://turkmenistanairlines.tm/")

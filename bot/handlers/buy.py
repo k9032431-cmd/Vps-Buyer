@@ -884,6 +884,9 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
+    elif data["provider"] in RESERVE_PROVIDERS and data["prefixes"]:
+        lines.append("⚡ <b>Сначала только IP:</b> бот берёт резервные IP без серверов и покупает сервер "
+                     "только на IP из выбранных подсетей — лимит серверов почти не тратится.")
     lines.append("✅ Только рабочие: каждый подходящий сервер проверяется, не прошедшие проверку удаляются.\n"
                  if config.check_url else "")
     lines.append((f"💸 Серверы с чужим IP удаляются сразу ({_attempts_text()}). " if data["prefixes"]
@@ -920,8 +923,8 @@ def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str
     if job.check_url:
         text += f"🔎 Проверено: <b>{job.checked}</b>"
         text += f"   ⏭ Пропущено (нерабочие блоки): <b>{job.skipped_bad}</b>\n" if job.skipped_bad else "\n"
-    if job.mode == "ports":
-        text += f"⚡ Проверено IP (бесплатно): <b>{job.ports_checked}</b>\n"
+    if job.ports_checked:
+        text += f"⚡ IP проверено без сервера: <b>{job.ports_checked}</b>   🎯 В подсетях: <b>{job.port_matches}</b>\n"
     text += (f"✅ Готово: <b>{len(job.kept)}/{job.count}</b>   "
              f"🆕 Создано: <b>{job.attempts}</b>   🗑 Удалено: <b>{job.deleted}</b>\n")
     if job.log:
