@@ -6,6 +6,7 @@ from aiogram.utils.text_decorations import html_decoration as hd
 
 from .. import db
 from ..config import config
+from ..providers import PROVIDERS
 from ..keyboards import back, kb, main_menu
 
 router = Router()
@@ -25,7 +26,7 @@ def welcome(name: str) -> str:
         f"👋 Привет, <b>{hd.quote(name)}</b>!\n\n"
         "🤖 <b>VPS Buyer</b> покупает облачные серверы с нужным IP.\n\n"
         "🔑 Подключите аккаунт провайдера\n"
-        "📍 Выберите локацию и IP-блоки\n"
+        "📍 Выберите провайдера и локацию\n"
         "🎯 Бот подбирает IP и присылает готовые серверы\n\n"
         "👇 Выберите раздел"
     )
@@ -59,16 +60,19 @@ async def profile(cb: CallbackQuery):
 
 @router.callback_query(F.data == "info")
 async def info(cb: CallbackQuery):
+    step3 = ("3️⃣ Отметьте нужные подсети, например <code>95.182.87.#</code>, или «🌐 Любой IP». "
+             "«📌 Сохранить для пользователей» — из этих подсетей будут покупать все.\n\n"
+             if _admin(cb.from_user.id) or not config.admin_ids else
+             "3️⃣ Рабочие подсети уже подобраны админом — выбирать ничего не нужно.\n\n")
     text = (
         "ℹ️ <b>Как это работает</b>\n\n"
-        "1️⃣ <b>🔑 Аккаунты</b> — подключите аккаунт провайдера (HostVDS, Selectel VDS, Timeweb Cloud, Aeza, "
-        "Serverspace, DigitalOcean).\n\n"
+        "1️⃣ <b>🔑 Аккаунты</b> — подключите аккаунт провайдера (" + ", ".join(PROVIDERS.values()) + ").\n\n"
         "2️⃣ <b>🛒 Купить сервер</b> — провайдер → аккаунт → локация.\n\n"
-        "3️⃣ Отметьте нужные подсети, например <code>95.182.87.#</code>, или «🌐 Любой IP».\n\n"
+        + step3 +
         "4️⃣ Укажите количество, тариф, Network plan и ОС.\n\n"
         "5️⃣ Бот подбирает IP, проверяет каждый подходящий сервер и присылает только рабочие — с паролем или "
         "вашим ключом. Остальные удаляются.\n\n"
-        "☁️ <b>Мои серверы</b> — пароли, удаление и «🛠 Восстановить доступ».\n\n"
+        "☁️ <b>Мои серверы</b> — по провайдерам: пароли, удаление и «🛠 Восстановить доступ».\n\n"
         f"💸 Каждое создание сервера может стоить денег (почасовая оплата). "
         + (f"Лимит попыток: <b>{config.max_attempts}</b>." if config.max_attempts > 0
            else "Лимита попыток нет — покупку можно остановить кнопкой ⛔.")

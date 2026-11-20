@@ -53,6 +53,7 @@ class PurchaseJob:
     ssh_key: str | None = None                                    # log in with this public key instead of a password
     ssh_key_name: str = ""
     hinted: bool = False
+    hide_prefixes: bool = False  # the user did not choose the subnets (the admin did) — don't show them
     # "only working" mode: the bot logs in over SSH and opens this page from the server
     check_url: str | None = None
     bot_key: tuple[str, str] | None = None       # (private key file, public key line) of the bot
@@ -408,7 +409,10 @@ async def run_purchase(client, job: PurchaseJob,
         if (job.prefixes and not job.kept and not job.hinted and job.attempts >= NO_MATCH_HINT
                 and not any(ip_matches(ip, job.prefixes) for ip in job.seen)):
             job.hinted = True
-            job.log.append(f"💡 За {job.attempts} попыток ни одного IP из выбранных подсетей — похоже, этот "
+            job.log.append(f"💡 За {job.attempts} попыток ни одного подходящего IP — похоже, этот дата-центр "
+                           "их сейчас не выдаёт. Остановите покупку и попробуйте другую локацию или напишите "
+                           "админу." if job.hide_prefixes else
+                           f"💡 За {job.attempts} попыток ни одного IP из выбранных подсетей — похоже, этот "
                            "дата-центр их сейчас не выдаёт. Остановите покупку и выберите подсети с ⭐ "
                            "(те, что здесь реально выпадают).")
         await on_progress(job)

@@ -20,6 +20,7 @@ def main_menu(admin: bool = False, pending: int = 0) -> InlineKeyboardMarkup:
     if admin:
         rows.append([Btn(text=f"👥 Пользователи{f' · 🙋 {pending}' if pending else ''}", callback_data="users"),
                      Btn(text="🔄 Обновить бота", callback_data="update")])
+        rows.append([Btn(text="📌 Подсети для пользователей", callback_data="presets")])
     rows.append([Btn(text="🛒 Купить сервер", callback_data="buy")])
     return kb(*rows)
 

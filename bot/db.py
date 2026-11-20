@@ -1,3 +1,4 @@
+import json
 import os
 from dataclasses import dataclass
 
@@ -69,6 +70,14 @@ CREATE TABLE IF NOT EXISTS check_blocks (
     passed INTEGER NOT NULL DEFAULT 0,
     failed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (provider, region, block)
+);
+CREATE TABLE IF NOT EXISTS presets (     -- subnets the admin chose for everyone, per provider + location
+    provider TEXT NOT NULL,
+    region TEXT NOT NULL,
+    label TEXT NOT NULL DEFAULT '',
+    prefixes TEXT NOT NULL,          -- JSON list of prefixes / CIDRs
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (provider, region)
 );
 CREATE TABLE IF NOT EXISTS ssh_keys (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -343,3 +352,30 @@ async def add_check_results(provider: str, region: str, results: list[tuple[str,
                 "ON CONFLICT(provider, region, block) DO UPDATE SET passed=passed+excluded.passed, "
                 "failed=failed+excluded.failed", (provider, region, block, int(passed), int(not passed)))
         await db.commit()
+
+
+# ---------- admin's subnets for everyone ----------
+async def get_preset(provider: str, region: str) -> list[str]:
+    async with aiosqlite.connect(config.db_path) as db:
+        row = await (await db.execute("SELECT prefixes FROM presets WHERE provider=? AND region=?",
+                                      (provider, region))).fetchone()
+    return json.loads(row[0]) if row else []
+
+
+async def set_preset(provider: str, region: str, label: str, prefixes: list[str]) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        if prefixes:
+            await db.execute(
+                "INSERT INTO presets (provider, region, label, prefixes) VALUES (?,?,?,?) "
+                "ON CONFLICT(provider, region) DO UPDATE SET label=excluded.label, prefixes=excluded.prefixes, "
+                "updated_at=CURRENT_TIMESTAMP", (provider, region, label, json.dumps(prefixes)))
+        else:
+            await db.execute("DELETE FROM presets WHERE provider=? AND region=?", (provider, region))
+        await db.commit()
+
+
+async def list_presets() -> list[tuple[str, str, str, list[str]]]:
+    async with aiosqlite.connect(config.db_path) as db:
+        rows = await (await db.execute(
+            "SELECT provider, region, label, prefixes FROM presets ORDER BY provider, label")).fetchall()
+    return [(p, r, label, json.loads(x)) for p, r, label, x in rows]

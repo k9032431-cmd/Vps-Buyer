@@ -28,21 +28,65 @@ async def _delete(user_id: int, row: db.ServerRow) -> str | None:
     return None
 
 
+OTHER = "other"  # servers whose account was deleted
+
+
+def _name(provider: str) -> str:
+    return PROVIDER_NAMES.get(provider, "Без аккаунта")
+
+
+async def _by_provider(user_id: int) -> dict[str, list[db.ServerRow]]:
+    """The user's servers grouped by provider, providers in the bot's usual order."""
+    rows = await db.list_servers(user_id)
+    providers: dict[int, str] = {}
+    for r in rows:
+        if r.account_id not in providers:
+            acc = await db.get_account(user_id, r.account_id)
+            providers[r.account_id] = acc.provider if acc else OTHER
+    groups: dict[str, list[db.ServerRow]] = {}
+    for r in rows:
+        groups.setdefault(providers[r.account_id], []).append(r)
+    order = list(PROVIDER_NAMES) + [OTHER]
+    return dict(sorted(groups.items(), key=lambda kv: order.index(kv[0]) if kv[0] in order else len(order)))
+
+
+def _line(r: db.ServerRow) -> str:
+    return f"🖥 <code>{r.ip}</code>  ·  📍 {hd.quote(r.region)}"
+
+
 @router.callback_query(F.data == "servers")
 async def servers(cb: CallbackQuery):
-    rows = await db.list_servers(cb.from_user.id)
-    if not rows:
+    groups = await _by_provider(cb.from_user.id)
+    if not groups:
         await cb.message.edit_text(
             "☁️ <b>Мои серверы</b>\n\n📭 Пока пусто.\nНажмите «🛒 Купить сервер» в главном меню.",
             reply_markup=kb([Btn(text="🛒 Купить сервер", callback_data="buy")], back("menu", "🏠 Главное меню")))
         return await cb.answer()
-    buttons = [[Btn(text=f"🖥 {r.ip}  ·  📍 {r.region}", callback_data=f"srv:{r.id}")] for r in rows]
+    total = sum(len(v) for v in groups.values())
+    text = f"☁️ <b>Мои серверы</b> · {total}\n"
+    for prov, rows in groups.items():
+        text += f"\n<b>☁️ {_name(prov)}</b> · {len(rows)}\n" + "\n".join(_line(r) for r in rows[:15])
+        if len(rows) > 15:
+            text += f"\n… и ещё {len(rows) - 15}"
+        text += "\n"
+    text += "\n💡 Нажмите на IP, чтобы скопировать.\n👇 Откройте провайдера, чтобы увидеть пароли или удалить серверы."
+    buttons = [[Btn(text=f"☁️ {_name(p)} · {len(rows)}", callback_data=f"srv:p:{p}")] for p, rows in groups.items()]
     buttons.append([Btn(text="🗑 Удалить все", callback_data="srv:delall")])
-    ips = "\n".join(f"🖥 <code>{r.ip}</code>  ·  📍 {hd.quote(r.region)}" for r in rows)
-    await cb.message.edit_text(f"☁️ <b>Мои серверы</b> · {len(rows)}\n\n{ips}\n\n"
-                               "💡 Нажмите на IP, чтобы скопировать.\n👇 Откройте сервер, чтобы увидеть пароль "
-                               "или удалить его.",
-                               reply_markup=kb(*buttons, back("menu", "🏠 Главное меню")))
+    await cb.message.edit_text(text[:4000], reply_markup=kb(*buttons, back("menu", "🏠 Главное меню")))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("srv:p:"))
+async def provider_servers(cb: CallbackQuery):
+    prov = cb.data.split(":", 2)[2]
+    rows = (await _by_provider(cb.from_user.id)).get(prov, [])
+    if not rows:
+        return await servers(cb)
+    text = (f"☁️ <b>{_name(prov)}</b> · {len(rows)}\n\n" + "\n".join(_line(r) for r in rows)
+            + "\n\n👇 Откройте сервер, чтобы увидеть пароль или удалить его.")
+    buttons = [[Btn(text=f"🖥 {r.ip}  ·  📍 {r.region}", callback_data=f"srv:{r.id}")] for r in rows]
+    buttons.append([Btn(text=f"🗑 Удалить все {_name(prov)}"[:60], callback_data=f"srv:dp:{prov}")])
+    await cb.message.edit_text(text[:4000], reply_markup=kb(*buttons, back("servers", "⬅️ Все серверы")))
     await cb.answer()
 
 
@@ -64,7 +108,7 @@ async def _card(user_id: int, row: db.ServerRow) -> tuple[str, object]:
                  "с новым паролем. IP останется тем же.</i>")
         rows.append([Btn(text="🛠 Восстановить доступ", callback_data=f"srv:fix:{row.id}")])
     rows.append([Btn(text="🗑 Удалить сервер", callback_data=f"srv:del:{row.id}")])
-    rows.append(back("servers", "⬅️ К списку серверов"))
+    rows.append(back(f"srv:p:{provider or OTHER}", f"⬅️ К серверам {_name(provider or OTHER)}"[:60]))
     return text, kb(*rows)
 
 
@@ -157,9 +201,25 @@ async def confirm_delete_all(cb: CallbackQuery):
     await cb.answer()
 
 
+@router.callback_query(F.data.startswith("srv:dp:"))
+async def confirm_delete_provider(cb: CallbackQuery):
+    prov = cb.data.split(":", 2)[2]
+    rows = (await _by_provider(cb.from_user.id)).get(prov, [])
+    await cb.message.edit_text(
+        f"🗑 <b>Удалить все серверы {_name(prov)} ({len(rows)})?</b>\n\n⚠️ Они будут удалены у провайдера "
+        "безвозвратно.",
+        reply_markup=kb([Btn(text="✅ Да, удалить", callback_data=f"srv:dpy:{prov}"),
+                         Btn(text="❌ Нет", callback_data=f"srv:p:{prov}")]))
+    await cb.answer()
+
+
 @router.callback_query(F.data == "srv:delall:yes")
+@router.callback_query(F.data.startswith("srv:dpy:"))
 async def do_delete_all(cb: CallbackQuery):
-    rows = await db.list_servers(cb.from_user.id)
+    if cb.data.startswith("srv:dpy:"):
+        rows = (await _by_provider(cb.from_user.id)).get(cb.data.split(":", 2)[2], [])
+    else:
+        rows = await db.list_servers(cb.from_user.id)
     await cb.message.edit_text(f"⏳ Удаляю {len(rows)} серверов…")
     await cb.answer()
     errors = await asyncio.gather(*(_delete(cb.from_user.id, r) for r in rows))
