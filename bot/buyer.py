@@ -157,15 +157,17 @@ def _err(e: BaseException) -> str:
     return html.escape(str(e) or type(e).__name__)[:300]
 
 
-async def _delete(client, job: PurchaseJob, server_id: str, ip: str | None = None) -> None:
+async def _delete(client, job: PurchaseJob, server_id: str, ip: str | None = None) -> bool:
     """Delete a server we do not keep; a failed delete is reported but never stops the purchase."""
     try:
         await client.delete_server(job.region, server_id)
         job.deleted += 1
+        return True
     except Exception as e:
         logging.getLogger(__name__).exception("delete failed for %s", server_id)
         what = _code(ip) if ip else html.escape(server_id)
         job.log.append(f"❗ {what} — не удалось удалить ({_err(e)[:150]}). Проверьте панель провайдера.")
+        return False
 
 
 def _note_error(job: PurchaseJob, e: BaseException) -> None:
@@ -280,8 +282,8 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
                 await _finalize(client, job, state)
             await _found(job, state)
             return
-    await _delete(client, job, srv.id, ip)  # also releases the port
-    job.log.append(f"🗑 {_code(ip)} — {reason}, удалён")
+    if await _delete(client, job, srv.id, ip):  # also releases the port
+        job.log.append(f"🗑 {_code(ip)} — {reason}, удалён")
 
 
 # ---------------- fallback mode: servers ----------------
@@ -345,9 +347,9 @@ async def _try_server(client, job: PurchaseJob) -> None:
     except BaseException:
         await _delete(client, job, srv.id)
         raise
-    await _delete(client, job, srv.id)
     ips = ", ".join(_code(ip) for ip in state.ipv4) or "без IP"
-    job.log.append(f"🗑 {ips} — {html.escape(reason)}, удалён")
+    if await _delete(client, job, srv.id, state.ipv4[0] if state.ipv4 else None):
+        job.log.append(f"🗑 {ips} — {html.escape(reason)}, удалён")
 
 
 async def run_purchase(client, job: PurchaseJob,

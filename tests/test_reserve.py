@@ -220,6 +220,35 @@ async def civo_reserved():
         await srv.close()
 
 
+def vultr_locked_app():
+    st = {"tries": 0, "deleted": []}
+    a = web.Application()
+    a.router.add_get("/v2/reserved-ips", lambda r: web.json_response({"reserved_ips": [], "meta": {"links": {"next": ""}}}))
+
+    async def delete(req):
+        st["tries"] += 1
+        if st["tries"] < 3:  # a fresh instance is locked while it installs
+            return web.json_response({"error": "Server is currently locked", "status": 409}, status=409)
+        st["deleted"].append(req.match_info["id"])
+        return web.Response(status=204)
+    a.router.add_delete("/v2/instances/{id}", delete)
+    return a, st
+
+
+async def vultr_locked():
+    """'Server is currently locked' is not an error: the server is deleted in the background once unlocked."""
+    app, st = vultr_locked_app()
+    srv = TestServer(app)
+    await srv.start_server()
+    try:
+        async with vultr.VultrClient("t", str(srv.make_url("/v2"))) as c:
+            await c.delete_server("ewr", "inst-9")  # returns at once, no exception
+        await vultr.wait_pending(5)
+        assert st["deleted"] == ["inst-9"] and st["tries"] == 3
+    finally:
+        await srv.close()
+
+
 async def scenario():
     assert {"vultr", "hetzner", "civo"} <= RESERVE_PROVIDERS and "civo" in SCOUT_PROVIDERS
     orig_wait = buyer.BUSY_WAIT
@@ -235,6 +264,7 @@ async def scenario():
         await server_mode_limit()
         await vultr_limits()
         await civo_reserved()
+        await vultr_locked()
     finally:
         buyer.BUSY_WAIT = orig_wait
         buyer.asyncio.sleep = civo.asyncio.sleep = vultr.asyncio.sleep = ORIG_SLEEP

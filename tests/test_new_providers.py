@@ -221,6 +221,7 @@ async def vultr_scenario():
             # while the instance is still being destroyed — the bot keeps trying in the background
             await c.delete_server("ewr", job.kept[0].id)
             assert st["deleted"] == ["i-0"]
+        await vultr.wait_pending(5)
         assert st["deleted_rips"][-1] == "rip-1" and st["busy"]["rip-1"] == 2
     finally:
         await srv.close()
