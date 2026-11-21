@@ -223,7 +223,7 @@ async def scenario():
         finally:
             await srv2.close()
 
-        # ---------- ⭐ subnets this datacenter really handed out come first ----------
+        # ---------- subnets this datacenter really handed out come first ----------
         await db.add_seen_ips("digitalocean", "fra1", ["164.92.170.5", "164.92.171.9", "107.170.11.229"])
         await db.add_subnets("digitalocean", "fra1", ["107.170.0.0/17"])
         await ctx.set_data({"provider": "digitalocean", "account_id": acc, "regions": ["fra1"],
@@ -232,13 +232,9 @@ async def scenario():
         groups = s.texts()[-1]
         print("\n" + groups)
         lines = [l for l in groups.splitlines() if "<code>" in l]
-        assert lines[0].startswith("⭐ <code>164.92.#.#</code>") and "выпадало 2" in lines[0], lines
-        assert "⭐ <code>107.170.#.#</code>" in groups, "subnet seen here but missing from the geofeed is added"
-        assert "⭐ Выбрать выпадавшие" in markup_texts(s)
-        await dp.feed_update(bot, cb_update(21, "buy:iphits"))
-        picked = [p["prefix"] for i, p in enumerate((await ctx.get_data())["pools"])
-                  if i in (await ctx.get_data())["selected"]]
-        assert picked == ["107.170.0.0/17", "164.92.160.0/20"], picked
+        assert lines[0].startswith("▫️ <code>164.92.#.#</code>"), lines  # issued here → first, no star
+        assert "<code>107.170.#.#</code>" in groups, "subnet seen here but missing from the geofeed is added"
+        assert "⭐" not in groups and not any("Выбрать выпадавшие" in t for t in markup_texts(s))
     finally:
         await srv.close()
         digitalocean.asyncio.sleep = ORIG_SLEEP
@@ -278,11 +274,7 @@ async def stale_scenario():
         await dp.feed_update(bot, cb_update(5, "buy:fl:0"))
         await dp.feed_update(bot, cb_update(6, "buy:img:0"))
         await dp.feed_update(bot, cb_update(7, "buy:auth:pw"))
-        assert "Ни одна из выбранных подсетей ещё не выпадала" in s.texts()[-1], s.texts()[-1]
-        # picking a ⭐ subnet → no warning
-        await ctx.update_data(prefixes=["164.92.160.0/20"])
-        await dp.feed_update(bot, cb_update(8, "buy:auth:pw"))
-        assert "Ни одна из выбранных" not in s.texts()[-1]
+        assert "Ни одна из выбранных" not in s.texts()[-1], "no star warnings any more"
 
         async with DigitalOceanClient(TOKEN, config.do_api_url) as c:
             job = PurchaseJob("fra1", Flavor("s-1vcpu-1gb", "s", 1, 1024, 25), "ubuntu-24-04-x64", None,

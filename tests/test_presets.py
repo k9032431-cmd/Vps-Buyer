@@ -81,6 +81,23 @@ async def scenario():
         await dp.feed_update(bot, cb(11, "buy:ipsave", UID))
         assert await db.get_preset("hostvds", "eu-west2") == ["95.182.87"]
 
+        # locations with saved subnets get a ⭐ and come first
+        regs = [("eu-west1", "🇩🇪 Frankfurt · eu-west1", True, ""), ("eu-west2", "🇳🇱 Amsterdam · eu-west2", True, "")]
+        orig_load = buy._load_regions
+
+        async def fake_load(cb_, state_, provider):
+            return regs
+        buy._load_regions = fake_load
+        try:
+            await uctx.update_data(provider="hostvds")
+            await dp.feed_update(bot, cb(30, f"buy:acc:{user_acc}", USER))
+        finally:
+            buy._load_regions = orig_load
+        labels = [b.text for b in buttons(s)]
+        assert labels[:2] == ["🇳🇱 Amsterdam · eu-west2 ⭐", "🇩🇪 Frankfurt · eu-west1"], labels
+        assert "⭐ — здесь есть рабочие подсети" in s.texts()[-1]
+        assert (await uctx.get_data())["regions"][0] == "eu-west2"
+
         # 4) user: goes straight to the count step, subnets used but not shown
         await dp.feed_update(bot, cb(12, "buy", USER))
         await uctx.update_data(provider="hostvds", account_id=user_acc, **REGION)

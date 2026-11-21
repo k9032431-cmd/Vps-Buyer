@@ -151,7 +151,7 @@ async def scenario():
         plans_markup = [b.text for row in s.calls[-1].reply_markup.inline_keyboard for b in row] \
             if getattr(s.calls[-1], "reply_markup", None) else []
         print("NETWORK PLAN BUTTONS:", plans_markup)
-        assert plans_markup[:3] == ["⭐ Limited 50 Mbps · бесплатно", "Unlimited Shared 100 Mbps · €0.49/мес",
+        assert plans_markup[:3] == ["✔️ Limited 50 Mbps · бесплатно", "Unlimited Shared 100 Mbps · €0.49/мес",
                                     "Unlimited Shared 1 Gbps · €0.99/мес"], plans_markup
         assert "🔽 Показать все планы (4)" in plans_markup
         await dp.feed_update(bot, cb_update(7, "buy:npall"))

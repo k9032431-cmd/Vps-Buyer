@@ -141,13 +141,18 @@ async def show_regions(cb: CallbackQuery, state: FSMContext, account_id: int):
         await cb.message.edit_text(text[:4000], reply_markup=kb(
             [Btn(text="🔄 Проверить снова", callback_data=f"buy:refresh:{data['account_id']}")], back("buy")))
         return
+    saved = {r for p, r, _l, _x in await db.list_presets() if p == data.get("provider", "hostvds")}
+    available.sort(key=lambda x: x[0] not in saved)  # locations with working subnets first
     await state.update_data(regions=[r for r, _ in available], region_labels={r: label for r, label in available})
     text = (f"📍 <b>Шаг {_step(data, 'region')}.</b> Выберите локацию 👇\n\n"
             f"✅ Доступно: <b>{len(available)}</b> из {len(regions)}")
+    if saved & {r for r, _ in available}:
+        text += "\n⭐ — здесь есть рабочие подсети"
     if unavailable:
         text += "\n\n🚫 <i>Сейчас недоступны:</i>\n" + "\n".join(
             f"• {hd.quote(label)} — {hd.quote(reason[:60])}" for label, reason in unavailable)
-    buttons = [Btn(text=label, callback_data=f"buy:reg:{i}") for i, (_, label) in enumerate(available)]
+    buttons = [Btn(text=f"{label} ⭐" if r in saved else label, callback_data=f"buy:reg:{i}")
+               for i, (r, label) in enumerate(available)]
     await cb.message.edit_text(text[:4000], reply_markup=kb(
         *grid(buttons, 1),
         [Btn(text="🔄 Обновить", callback_data=f"buy:refresh:{data['account_id']}")],
@@ -402,7 +407,7 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
             groups.setdefault(_group(p["prefix"]), []).append(i)
         hits = {g: sum(pools[i].get("hits", 0) for i in idx) for g, idx in groups.items()}
         works = {g: sum(pools[i].get("passed", 0) for i in idx) for g, idx in groups.items()}
-        # 🟢 passed the check before, then ⭐ issued here, then the rest
+        # 🟢 passed the check before, then subnets this datacenter has issued, then the rest
         groups = dict(sorted(groups.items(), key=lambda kv: (-works[kv[0]], -hits[kv[0]])))
         text = (f"🌐 <b>Шаг 3.</b> Выберите подсети\n"
                 f"📍 {hd.quote(data['region_label'])} · подсетей: <b>{len(pools)}</b> · "
@@ -410,25 +415,19 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
         lines = []
         for g, idx in groups.items():
             picked = sum(1 for i in idx if i in selected)
-            lines.append(f"{'✅' if picked else '🟢' if works[g] else '⭐' if hits[g] else '▫️'} <code>{g}.#.#</code> — "
+            lines.append(f"{'✅' if picked else '🟢' if works[g] else '▫️'} <code>{g}.#.#</code> — "
                          f"{len(idx)} {_plural_subnets(len(idx))}"
                          + (f", 🟢 рабочих {works[g]}" if works[g] else "")
-                         + (f", выпадало {hits[g]}" if hits[g] else "")
                          + (f", выбрано {picked}" if picked else ""))
         text += _fit(lines, 3000)
         text += "\n\n💡 Откройте группу и отметьте подсети с нужной маской — бот купит сервер с IP из любой из них."
         if any(works.values()):
             text += "\n🟢 — здесь уже находились рабочие серверы: выбирайте их, так быстрее."
-        if any(hits.values()):
-            text += ("\n⭐ — подсети, которые <b>этот дата-центр</b> уже выдавал вам. Список провайдера общий на "
-                     "город, поэтому надёжнее выбирать ⭐.")
-        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else '🟢 ' if works[g] else '⭐ ' if hits[g] else ''}"
+        buttons = [Btn(text=f"{'✅ ' if any(i in selected for i in idx) else '🟢 ' if works[g] else ''}"
                             f"{g}.#.# · {len(idx)}", callback_data=f"buy:ipg:{g}") for g, idx in list(groups.items())[:80]]
         rows = grid(buttons, 2)
         if any(works.values()):
             rows.append([Btn(text="🟢 Выбрать рабочие", callback_data="buy:ipwork")])
-        if any(hits.values()):
-            rows.append([Btn(text="⭐ Выбрать выпадавшие", callback_data="buy:iphits")])
         rows.append([Btn(text="🌐 Любой IP", callback_data="buy:ipany")])
         if data.get("provider") in SCOUT_PROVIDERS:
             rows.append([Btn(text="🔍 Разведать доступные IP", callback_data="buy:scan")])
@@ -437,11 +436,11 @@ async def render_subnet_screen(msg: Message, state: FSMContext, edit: bool):
     else:
         idx = [i for i, p in enumerate(pools) if _group(p["prefix"]) == group]
         text = (f"🌐 <b>Подсети {group}.#.#</b> · {len(idx)}\n📍 {hd.quote(data['region_label'])}\n\n"
-                + _fit([f"{'✅' if i in selected else _work_mark(pools[i]) or ('⭐' if pools[i].get('hits') else '▫️')} "
+                + _fit([f"{'✅' if i in selected else _work_mark(pools[i]) or '▫️'} "
                         f"<code>{pools[i]['prefix']}</code> · {_blocks(pools[i]['prefix'])} бл."
-                        + (f" · выпадало {pools[i]['hits']}" if pools[i].get("hits") else "") + _work_note(pools[i])
+                        + _work_note(pools[i])
                         for i in idx], 3000))
-        buttons = [Btn(text=f"{'✅ ' if i in selected else (_work_mark(pools[i]) + ' ').lstrip() or ('⭐ ' if pools[i].get('hits') else '')}{pools[i]['prefix']}",
+        buttons = [Btn(text=f"{'✅ ' if i in selected else (_work_mark(pools[i]) + ' ').lstrip()}{pools[i]['prefix']}",
                        callback_data=f"buy:ipt:{i}") for i in idx[:80]]
         rows = grid(buttons, 2)
         if len(idx) > len(buttons):
@@ -474,15 +473,6 @@ async def ip_select_working(cb: CallbackQuery, state: FSMContext):
     await state.update_data(selected=sorted(selected))
     await render_ip_screen(cb.message, state, edit=True)
     await cb.answer("🟢 Отмечены подсети, где уже находились рабочие серверы")
-
-
-@router.callback_query(F.data == "buy:iphits")
-async def ip_select_hits(cb: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    selected = set(data.get("selected", [])) | {i for i, p in enumerate(data["pools"]) if p.get("hits")}
-    await state.update_data(selected=sorted(selected))
-    await render_ip_screen(cb.message, state, edit=True)
-    await cb.answer("⭐ Отмечены подсети, которые выпадали в этом дата-центре")
 
 
 @router.callback_query(F.data == "buy:ipgall")
@@ -753,7 +743,7 @@ async def flavor_selected(cb: CallbackQuery, state: FSMContext):
 
 def _plan_label(p: dict, currency: str, default: str) -> str:
     price = "бесплатно" if not p["price"] else f"{money(p['price'], currency)}/мес"
-    return f"{'⭐ ' if p['name'] == default else ''}{p['title']} · {price}"
+    return f"{'✔️ ' if p['name'] == default else ''}{p['title']} · {price}"
 
 
 async def show_network_plans(msg: Message, flavor: dict, show_all: bool, data: dict | None = None):
@@ -764,7 +754,7 @@ async def show_network_plans(msg: Message, flavor: dict, show_all: bool, data: d
     if not show_all and len(shown) < len(plans):
         rows.append([Btn(text=f"🔽 Показать все планы ({len(plans)})", callback_data="buy:npall")])
     text = (f"📶 <b>Шаг {_step({**(data or {}), 'has_netplan': True}, 'netplan')}.</b> Network plan для <b>{hd.quote(flavor['name'])}</b> 👇\n\n"
-            "⭐ Limited — входит в тариф, трафик ограничен\n"
+            "✔️ Limited — входит в тариф, трафик ограничен\n"
             "♾ Unlimited Shared — безлимитный трафик, общий канал\n"
             "🚀 Unlimited Dedicated — безлимит, выделенный канал (в «Все планы»)")
     await msg.edit_text(text, reply_markup=kb(*rows, back("buy", "❌ Отмена")))
@@ -954,12 +944,6 @@ async def render_confirm(msg: Message, state: FSMContext, edit: bool):
     if data["provider"] not in SSH_KEY_PROVIDERS:
         lines.insert(-1, "ℹ️ У этого провайдера ключ при заказе передать нельзя — вход по паролю root.")
     pools = data.get("pools") or []
-    if data.get("is_admin", True) and _subnet_mode(pools) and any(p.get("hits") for p in pools):
-        chosen = set(data.get("prefixes") or [])
-        if not any(p.get("hits") for p in pools if p["prefix"] in chosen):
-            lines.append("⚠️ <b>Ни одна из выбранных подсетей ещё не выпадала в этом дата-центре.</b> Старые "
-                         "диапазоны провайдер новым серверам почти не выдаёт — подбор может не закончиться. "
-                         "Надёжнее вернуться и выбрать подсети с ⭐.\n")
     if data.get("network_id") and data["provider"] == "hostvds":
         lines.append("⚡ <b>Быстрый режим:</b> IP подбирается бесплатно через сетевые порты, "
                      "сервер покупается только на подходящий IP.")
@@ -1216,7 +1200,7 @@ async def _scan_offer_ips(cb: CallbackQuery, state: FSMContext, data: dict):
         "2️⃣ записывает адрес\n"
         "3️⃣ сразу освобождает его и берёт следующий\n"
         "4️⃣ в конце присылает отчёт: какие блоки сейчас выдаются\n\n"
-        "⭐ Найденные подсети будут отмечены в выборе IP.",
+        "🔎 Найденные подсети появятся в выборе IP.",
         reply_markup=kb(*rows))
 
 
