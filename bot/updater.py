@@ -50,7 +50,7 @@ async def update() -> UpdateResult:
     if old == new:
         return UpdateResult(False, old, new, [])
     changes = (await _run("git", "log", "--format=%s", f"{old}..{new}")).splitlines()
-    await _run(sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt")
+    await _run(sys.executable, "-m", "pip", "install", "-q", "--prefer-binary", "-r", "requirements.txt")
     return UpdateResult(True, old, new, changes)
 
 
