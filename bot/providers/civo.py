@@ -202,6 +202,18 @@ class CivoClient:
             srv.admin_pass = None
         return srv
 
+    async def list_servers(self) -> list[Server]:
+        result = []
+        for r in await self._request("GET", "/regions"):
+            if not (r.get("features") or {}).get("iaas", True):
+                continue
+            for i in await self._instances(r["code"]):
+                srv = self._server(i)
+                srv.region = r["code"]
+                self._regions_of[srv.id] = r["code"]
+                result.append(srv)
+        return result
+
     async def get_server(self, region: str, server_id: str) -> Server:
         region = region or self._regions_of.get(server_id, "")
         return self._server(await self._request("GET", f"/instances/{server_id}", params={"region": region}))

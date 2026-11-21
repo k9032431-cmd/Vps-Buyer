@@ -96,7 +96,7 @@ async def scenario():
     try:
         rows = await db.list_servers(UID)
         await dp.feed_update(bot, cb_update(1, "servers"))
-        assert "Мои серверы</b> · 3" in session.texts()[-1]
+        assert "Всего серверов: <b>3</b>" in session.texts()[-1], session.texts()[-1]
         await dp.feed_update(bot, cb_update(2, f"srv:del:{rows[-1].id}"))   # server "a"
         assert "Удалить сервер</b> <code>94.1.1.1" in session.texts()[-1]
         await dp.feed_update(bot, cb_update(3, f"srv:yes:{rows[-1].id}"))

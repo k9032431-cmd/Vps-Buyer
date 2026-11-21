@@ -360,6 +360,17 @@ class HostVDSClient:
                             json={"rebuild": rebuild}, microversion="compute 2.57")
         return password
 
+    async def list_servers(self) -> list[Server]:
+        """Every server in the project, all regions."""
+        await self._ensure_token()
+        result = []
+        for region in self.regions():
+            data = await self._request("GET", "compute", region, "/servers/detail")
+            for s in data.get("servers", []):
+                ips = [a["addr"] for addrs in s.get("addresses", {}).values() for a in addrs if a.get("version") == 4]
+                result.append(Server(s["id"], s["name"], s["status"], ips, region=region))
+        return result
+
     async def get_server(self, region: str, server_id: str) -> Server:
         s = (await self._request("GET", "compute", region, f"/servers/{server_id}"))["server"]
         ips = [a["addr"] for addrs in s.get("addresses", {}).values() for a in addrs if a.get("version") == 4]

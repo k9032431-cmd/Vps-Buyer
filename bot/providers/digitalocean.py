@@ -249,6 +249,14 @@ class DigitalOceanClient:
                     pass
             return None  # the user_data script still installs the key and lifts the expiry
 
+    async def list_servers(self) -> list[Server]:
+        result = []
+        for d in await self._all("/droplets", "droplets"):
+            srv = self._server(d)
+            srv.region = (d.get("region") or {}).get("slug", "")
+            result.append(srv)
+        return result
+
     async def get_server(self, region: str, server_id: str) -> Server:
         return self._server((await self._request("GET", f"/droplets/{server_id}"))["droplet"])
 

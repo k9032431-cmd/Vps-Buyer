@@ -104,6 +104,7 @@ class Server:
     admin_pass: str | None = None
     cidrs: list[str] = field(default_factory=list)   # public subnets of its IPs, when the provider tells
     finalized: bool = False                          # provider-specific last step already done
+    region: str = ""                                 # filled by list_servers()
 
 
 SSH_KEY_TYPES = ("ssh-ed25519", "ssh-rsa", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",

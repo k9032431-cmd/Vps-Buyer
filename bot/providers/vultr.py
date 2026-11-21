@@ -212,6 +212,14 @@ class VultrClient:
             srv.admin_pass = None  # you chose your own key
         return srv
 
+    async def list_servers(self) -> list[Server]:
+        result = []
+        for i in await self._all("/instances", "instances"):
+            srv = self._server(i)
+            srv.region = i.get("region", "")
+            result.append(srv)
+        return result
+
     async def get_server(self, region: str, server_id: str) -> Server:
         return self._server((await self._request("GET", f"/instances/{server_id}"))["instance"])
 

@@ -189,6 +189,14 @@ class HetznerClient:
         srv.admin_pass = password
         return srv
 
+    async def list_servers(self) -> list[Server]:
+        result = []
+        for s in await self._all("/servers", "servers"):
+            srv = self._server(s)
+            srv.region = (((s.get("datacenter") or {}).get("location")) or {}).get("name", "")
+            result.append(srv)
+        return result
+
     async def get_server(self, region: str, server_id: str) -> Server:
         return self._server((await self._request("GET", f"/servers/{server_id}"))["server"])
 

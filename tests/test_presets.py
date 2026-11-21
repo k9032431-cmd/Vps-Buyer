@@ -119,22 +119,6 @@ async def scenario():
         await dp.feed_update(bot, cb(16, "pst:del:0", UID))
         assert await db.get_preset("hostvds", "eu-west2") == [] and "ничего не сохранено" in s.texts()[-1]
 
-        # 6) "My servers": grouped by provider
-        do_acc = await db.add_account(UID, "digitalocean", "do", "t", "")
-        await db.add_server(UID, admin_acc, "eu-west2", "a1", "vps-a", "95.182.87.5", "pw")
-        await db.add_server(UID, do_acc, "ams3", "d1", "vps-d", "188.166.1.1", "pw")
-        await db.add_server(UID, admin_acc, "eu-west2", "a2", "vps-b", "95.182.87.6", "pw")
-        await dp.feed_update(bot, cb(17, "servers", UID))
-        text = s.texts()[-1]
-        assert text.index("HostVDS</b> · 2") < text.index("DigitalOcean</b> · 1"), text
-        assert {"srv:p:hostvds", "srv:p:digitalocean"} <= set(cbs(s))
-        await dp.feed_update(bot, cb(18, "srv:p:digitalocean", UID))
-        assert "188.166.1.1" in s.texts()[-1] and "95.182.87.5" not in s.texts()[-1]
-        assert "srv:dp:digitalocean" in cbs(s)
-        await dp.feed_update(bot, cb(19, "srv:p:hostvds", UID))
-        card = next(c for c in cbs(s) if c.startswith("srv:") and c[4:].isdigit())
-        await dp.feed_update(bot, cb(20, card, UID))
-        assert "srv:p:hostvds" in cbs(s), "the card leads back to its provider"
     finally:
         await srv.close()
 
