@@ -249,6 +249,41 @@ async def vultr_locked():
         await srv.close()
 
 
+class FakeReuse(FakeReserve):
+    """Linode-like: a freed IP goes straight to the next new server."""
+    supports_ports = False
+
+    def __init__(self):
+        super().__init__([], [])
+        self.free = ["172.105.86.147"]          # the IP the cloud hands out first
+        self.pool = iter(["172.105.1.1", "172.105.2.2", "139.162.130.7"])
+        self.alive = {}
+
+    async def create_server(self, region, name, flavor, image_id, network_id, boot, port_id=None, metadata=None,
+                            ssh_key=None, extra_keys=None):
+        sid = f"s{len(self.servers)}"
+        self.servers[sid] = self.free.pop() if self.free else next(self.pool)
+        self.alive[sid] = self.servers[sid]
+        self.created.append((sid, None))
+        return Server(sid, name, "BUILD", [], "pw")
+
+    async def delete_server(self, region, sid):
+        self.deleted.append(sid)
+        self.free.append(self.alive.pop(sid))
+
+
+async def reused_ip():
+    """The same wrong IP again → wrong servers are held, other IPs come, the held ones go at the end."""
+    c = FakeReuse()
+    j = PurchaseJob("eu-central", FL, "img", None, ["139.162.130.0/24"], 1, max_attempts=0, parallel=1,
+                    active_timeout=5, boot_volume_gb=10)
+    await run_purchase(c, j, nothing)
+    assert [k.ipv4[0] for k in j.kept] == ["139.162.130.7"], (j.kept, j.log)
+    assert j.seen.count("172.105.86.147") == 2, "repeated once, then held"
+    assert any("тот же IP снова" in line for line in j.log) and not j.held
+    assert set(c.alive) == {j.kept[0].id}, "every held server deleted at the end"
+
+
 async def scenario():
     assert {"vultr", "hetzner", "civo"} <= RESERVE_PROVIDERS and "civo" in SCOUT_PROVIDERS
     orig_wait = buyer.BUSY_WAIT
@@ -265,6 +300,7 @@ async def scenario():
         await vultr_limits()
         await civo_reserved()
         await vultr_locked()
+        await reused_ip()
     finally:
         buyer.BUSY_WAIT = orig_wait
         buyer.asyncio.sleep = civo.asyncio.sleep = vultr.asyncio.sleep = ORIG_SLEEP

@@ -989,7 +989,8 @@ def _progress_text(job: PurchaseJob, done: bool = False, label: str = "") -> str
     if job.ports_checked:
         text += f"⚡ IP проверено без сервера: <b>{job.ports_checked}</b>   🎯 В подсетях: <b>{job.port_matches}</b>\n"
     text += (f"✅ Готово: <b>{len(job.kept)}/{job.count}</b>   "
-             f"🆕 Создано: <b>{job.attempts}</b>   🗑 Удалено: <b>{job.deleted}</b>\n")
+             f"🆕 Создано: <b>{job.attempts}</b>   🗑 Удалено: <b>{job.deleted}</b>"
+             + (f"   ⏸ Держу: <b>{len(job.held)}</b>" if job.held else "") + "\n")
     if job.log:
         text += "\n" + "\n".join(job.log[-12:])
     return text[:4000]

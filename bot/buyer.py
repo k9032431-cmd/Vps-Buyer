@@ -11,6 +11,7 @@ import asyncio
 import html
 import ipaddress
 import logging
+import os
 import secrets
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -28,6 +29,10 @@ RESERVE_NO_MATCH = 50
 QUOTA_TEXT = ("Лимит резервных IP аккаунта исчерпан (удалённые IP провайдер считает ещё до 24 часов, "
               "потом лимит освободится)")
 BUSY_WAIT = 15  # seconds between tries while the provider is busy or the account is at its limit
+# Some clouds (Linode…) hand a freed IP straight to the next new server, so "delete, create" returns
+# the same wrong IP forever. Once an IP repeats, wrong servers are kept (up to this many, oldest released
+# first) until the purchase ends, so the cloud has to give out other addresses.
+HOLD_SERVERS = int(os.getenv("HOLD_SERVERS", "5"))
 BUSY_ROUNDS_LIMIT = 20  # server rounds in a row refused by an account limit before the purchase stops
 SERVER_BUSY_RETRIES = 12  # tries to build a server on a found IP while the account is at its limit
 
@@ -74,6 +79,8 @@ class PurchaseJob:
     mode: str = ""               # "ports" | "servers"
     port_matches: int = 0        # reserved IPs / ports that were in the chosen subnets
     switch_reason: str = ""      # why IP hunting gave way to buying servers
+    held: list[tuple[str, str]] = field(default_factory=list)  # wrong servers kept so their IP isn't reissued
+    hold_mode: bool = False      # the provider repeated an IP: keep wrong servers for a while
     log: list[str] = field(default_factory=list)   # HTML-safe lines
     seen: list[str] = field(default_factory=list)  # every IP the provider gave us
     subnets: list[str] = field(default_factory=list)  # their subnets (CIDR), when the provider reports masks
@@ -316,6 +323,10 @@ async def _try_server(client, job: PurchaseJob) -> None:
     reason = "не тот IP"
     try:
         state = await client.wait_ip(job.region, srv.id, job.active_timeout)
+        if HOLD_SERVERS > 0 and not job.hold_mode and any(ip in job.seen for ip in state.ipv4):
+            job.hold_mode = True
+            job.log.append("🔁 Провайдер выдаёт тот же IP снова — дальше держу неподходящие серверы до конца "
+                           "покупки, чтобы он выдавал другие адреса")
         job.seen += state.ipv4
         job.subnets += [c for c in state.cidrs if c not in job.subnets]
         if job.prefixes:
@@ -352,8 +363,23 @@ async def _try_server(client, job: PurchaseJob) -> None:
         await _delete(client, job, srv.id)
         raise
     ips = ", ".join(_code(ip) for ip in state.ipv4) or "без IP"
+    if job.hold_mode and state.ipv4 and not job.cancelled:
+        job.held.append((srv.id, state.ipv4[0]))
+        job.log.append(f"⏸ {ips} — {html.escape(reason)}, пока держу (чтобы IP не выдали снова)")
+        while len(job.held) > HOLD_SERVERS:
+            old_id, old_ip = job.held.pop(0)
+            if await _delete(client, job, old_id, old_ip):
+                job.log.append(f"🗑 {_code(old_ip)} — отпущен")
+        return
     if await _delete(client, job, srv.id, state.ipv4[0] if state.ipv4 else None):
         job.log.append(f"🗑 {ips} — {html.escape(reason)}, удалён")
+
+
+async def _release_held(client, job: PurchaseJob) -> None:
+    held, job.held = job.held, []
+    if held:
+        results = await asyncio.gather(*(_delete(client, job, sid, ip) for sid, ip in held))
+        job.log.append(f"🗑 Удалены удержанные серверы: {sum(results)} из {len(held)}")
 
 
 async def run_purchase(client, job: PurchaseJob,
@@ -380,6 +406,15 @@ async def run_purchase(client, job: PurchaseJob,
             return job
 
     job.mode = "servers"
+    try:
+        await _server_rounds(client, job, on_progress)
+    finally:
+        await _release_held(client, job)
+        await on_progress(job)
+    return job
+
+
+async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
     unlimited = job.max_attempts <= 0
     busy_rounds = 0
     while (len(job.kept) < job.count and (unlimited or job.attempts < job.max_attempts)
@@ -388,6 +423,10 @@ async def run_purchase(client, job: PurchaseJob,
         batch = max(need, job.parallel)
         if hasattr(client, "free_slots"):  # account limit on servers at once (DigitalOcean)
             slots, limit = await client.free_slots()
+            while slots <= 0 and job.held:  # held servers must not eat the whole account limit
+                old_id, old_ip = job.held.pop(0)
+                if await _delete(client, job, old_id, old_ip):
+                    slots += 1
             waited = 0
             # right after a batch, servers we just deleted may still be counted for a few seconds
             # (also at the start: a previous purchase may still be deleting its droplets)
@@ -430,6 +469,8 @@ async def run_purchase(client, job: PurchaseJob,
                          "поднять лимит.")
             job.log.append(f"❗ {html.escape(job.error)}")
             break
+        if busy and job.held:  # at the account's server limit: let go of a held server to make room
+            old_id, old_ip = job.held.pop(0)
+            await _delete(client, job, old_id, old_ip)
         if busy:  # rate or capacity limit — give the provider a moment instead of hammering it
             await asyncio.sleep(BUSY_WAIT)
-    return job
