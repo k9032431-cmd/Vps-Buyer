@@ -32,7 +32,7 @@ BUSY_WAIT = 15  # seconds between tries while the provider is busy or the accoun
 # Some clouds (Linode…) hand a freed IP straight to the next new server, so "delete, create" returns
 # the same wrong IP forever. Once an IP repeats, wrong servers are kept (up to this many, oldest released
 # first) until the purchase ends, so the cloud has to give out other addresses.
-HOLD_SERVERS = int(os.getenv("HOLD_SERVERS", "5"))
+HOLD_SERVERS = int(os.getenv("HOLD_SERVERS", "100"))
 BUSY_ROUNDS_LIMIT = 20  # server rounds in a row refused by an account limit before the purchase stops
 SERVER_BUSY_RETRIES = 12  # tries to build a server on a found IP while the account is at its limit
 
