@@ -33,6 +33,7 @@ BUSY_WAIT = 15  # seconds between tries while the provider is busy or the accoun
 # the same wrong IP forever. Once an IP repeats, wrong servers are kept (up to this many, oldest released
 # first) until the purchase ends, so the cloud has to give out other addresses.
 HOLD_SERVERS = int(os.getenv("HOLD_SERVERS", "100"))
+REPEAT_STOP = 15  # servers in a row with an already seen IP (at the account limit) before the bot gives up
 BUSY_ROUNDS_LIMIT = 20  # server rounds in a row refused by an account limit before the purchase stops
 SERVER_BUSY_RETRIES = 12  # tries to build a server on a found IP while the account is at its limit
 
@@ -81,6 +82,8 @@ class PurchaseJob:
     switch_reason: str = ""      # why IP hunting gave way to buying servers
     held: list[tuple[str, str]] = field(default_factory=list)  # wrong servers kept so their IP isn't reissued
     hold_mode: bool = False      # the provider repeated an IP: keep wrong servers for a while
+    repeats: int = 0             # servers in a row that got an IP seen before
+    at_limit: bool = False       # the account's server limit was hit
     log: list[str] = field(default_factory=list)   # HTML-safe lines
     seen: list[str] = field(default_factory=list)  # every IP the provider gave us
     subnets: list[str] = field(default_factory=list)  # their subnets (CIDR), when the provider reports masks
@@ -179,9 +182,21 @@ async def _delete(client, job: PurchaseJob, server_id: str, ip: str | None = Non
         return False
 
 
+LIMIT_WORDS = ("limit", "maximum", "quota")
+
+
+def _busy(e: BaseException) -> bool:
+    """Rate limit, or the account's limit on servers (Linode: 'You've reached a limit for the number of active
+    services'): our own deletions free it up, so wait instead of stopping."""
+    return isinstance(e, ProviderError) and (
+        e.status == 429 or (e.status in (400, 403, 422) and any(w in str(e).lower() for w in LIMIT_WORDS)))
+
+
 def _note_error(job: PurchaseJob, e: BaseException) -> None:
-    job.log.append(f"⚠️ {_err(e)}")
-    if isinstance(e, ProviderError) and _fatal(e.status):
+    line = f"⚠️ {_err(e)}"
+    if line not in job.log[-4:] and not (_busy(e) and line in job.log):  # a limit error is said once
+        job.log.append(line)
+    if isinstance(e, ProviderError) and _fatal(e.status) and not _busy(e):
         job.error = str(e)
 
 
@@ -327,6 +342,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
             job.hold_mode = True
             job.log.append("🔁 Провайдер выдаёт тот же IP снова — дальше держу неподходящие серверы до конца "
                            "покупки, чтобы он выдавал другие адреса")
+        job.repeats = job.repeats + 1 if any(ip in job.seen for ip in state.ipv4) else 0
         job.seen += state.ipv4
         job.subnets += [c for c in state.cidrs if c not in job.subnets]
         if job.prefixes:
@@ -450,7 +466,7 @@ async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
         for r in results:
             if isinstance(r, BaseException):
                 _note_error(job, r)
-                busy = busy or (isinstance(r, ProviderError) and r.status == 429)
+                busy = busy or _busy(r)
         if (job.prefixes and not job.kept and not job.hinted and job.attempts >= NO_MATCH_HINT
                 and not any(ip_matches(ip, job.prefixes) for ip in job.seen)):
             job.hinted = True
@@ -462,6 +478,14 @@ async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
         await on_progress(job)
         if job.error:
             break
+        if busy:
+            job.at_limit = True
+        if job.at_limit and job.repeats >= REPEAT_STOP and not job.kept:
+            job.error = ("Провайдер раз за разом выдаёт одни и те же IP, а лимит серверов аккаунта не даёт держать "
+                         "больше, чтобы получить другие. Попросите поддержку провайдера поднять лимит серверов "
+                         "или выберите другую локацию.")
+            job.log.append(f"❗ {html.escape(job.error)}")
+            break
         busy_rounds = busy_rounds + 1 if busy and all(isinstance(r, BaseException) for r in results) else 0
         if busy_rounds >= BUSY_ROUNDS_LIMIT:
             job.error = ("Провайдер не даёт создать сервер (лимит аккаунта или тариф закончился в этой "
@@ -471,6 +495,9 @@ async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
             break
         if busy and job.held:  # at the account's server limit: let go of a held server to make room
             old_id, old_ip = job.held.pop(0)
-            await _delete(client, job, old_id, old_ip)
+            if await _delete(client, job, old_id, old_ip):
+                job.log.append(f"🗑 {_code(old_ip)} — отпущен (лимит серверов аккаунта)")
+                await asyncio.sleep(5)  # the provider may count a just-deleted server for a moment
+                continue
         if busy:  # rate or capacity limit — give the provider a moment instead of hammering it
             await asyncio.sleep(BUSY_WAIT)

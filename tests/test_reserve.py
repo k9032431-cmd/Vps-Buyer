@@ -284,6 +284,28 @@ async def reused_ip():
     assert set(c.alive) == {j.kept[0].id}, "every held server deleted at the end"
 
 
+class FakeReuseLimited(FakeReuse):
+    """…and the account allows only 3 servers at once (Linode answers 400 'limit … active services')."""
+    async def create_server(self, *a, **k):
+        if len(self.alive) >= 3:
+            raise ProviderError("Linode POST /linode/instances → 400: You've reached a limit for the number of "
+                                "active services on your account.", 400)
+        return await super().create_server(*a, **k)
+
+
+async def reused_ip_limited():
+    """A tiny account limit: released IPs come straight back, the bot can't escape → it stops and explains."""
+    c = FakeReuseLimited()
+    c.pool = iter(f"172.105.{i}.1" for i in range(1, 3))
+    j = PurchaseJob("eu-central", FL, "img", None, ["139.162.130.0/24"], 1, max_attempts=0, parallel=1,
+                    active_timeout=5, boot_volume_gb=10)
+    await asyncio.wait_for(run_purchase(c, j, nothing), 20)
+    assert j.error and "поднять лимит" in j.error, j.log
+    assert any("отпущен (лимит серверов аккаунта)" in line for line in j.log)
+    assert sum("active services" in line for line in j.log) <= 3, "the limit error is not repeated each round"
+    assert not c.alive, "nothing left running"
+
+
 async def scenario():
     assert {"vultr", "hetzner", "civo"} <= RESERVE_PROVIDERS and "civo" in SCOUT_PROVIDERS
     orig_wait = buyer.BUSY_WAIT
@@ -301,6 +323,7 @@ async def scenario():
         await civo_reserved()
         await vultr_locked()
         await reused_ip()
+        await reused_ip_limited()
     finally:
         buyer.BUSY_WAIT = orig_wait
         buyer.asyncio.sleep = civo.asyncio.sleep = vultr.asyncio.sleep = ORIG_SLEEP
