@@ -12,6 +12,7 @@ from bot import db
 from bot.config import config
 
 object.__setattr__(config, "hostvds_public_api", "http://127.0.0.1:9")
+from bot import notify  # noqa: E402
 from bot.handlers import accounts, buy, menu, servers, update  # noqa: E402
 from tests.test_ip_select import buttons, fake_hostvds  # noqa: E402
 from tests.test_servers_update import UID, FakeSession  # noqa: E402
@@ -66,9 +67,22 @@ async def scenario():
         await dp.feed_update(bot, cb(5, "buy:ipt:4", UID))   # 95.182.87
         await dp.feed_update(bot, cb(6, "buy:ipt:0", UID))   # 94.103.80
         assert "buy:ipsave" in cbs(s)
+        await db.touch_visitor(555, "stranger", "No Access")    # wrote to the bot once, has no access
+        await db.touch_visitor(666, "gone", "Blocked Bot")
+        await db.mark_blocked(666)                               # blocked the bot → not bothered
         await dp.feed_update(bot, cb(7, "buy:ipsave", UID))
+        await asyncio.gather(*notify._TASKS)
+        sent = [c for c in s.calls if type(c).__name__ == "SendMessage"]
+        news = [c for c in sent if "Найдены новые рабочие подсети" in c.text]
+        assert sorted(c.chat_id for c in news) == sorted([555, USER]), [c.chat_id for c in news]  # not the admin, not 666
+        assert "HostVDS" in news[0].text and "Amsterdam" in news[0].text and "95.182" not in news[0].text
+        assert news[0].reply_markup.inline_keyboard[0][0].callback_data == "buy"
+        report = [c for c in sent if c.chat_id == UID and "Уведомление разослано" in c.text]
+        assert report and "Доставлено: <b>2</b>" in report[0].text
         assert await db.get_preset("hostvds", "eu-west2") == ["94.103.80", "95.182.87"]
-        assert "Для пользователей сохранено: <b>2</b>" in s.texts()[-1] and "buy:ipunsave" in cbs(s)
+        screen = [c for c in s.calls if type(c).__name__ == "EditMessageText"][-1]
+        assert "Для пользователей сохранено: <b>2</b>" in screen.text
+        assert "buy:ipunsave" in [b.callback_data for row in screen.reply_markup.inline_keyboard for b in row]
 
         # a user can't save
         await dp.feed_update(bot, cb(8, "buy:ipsave", USER))
@@ -78,8 +92,11 @@ async def scenario():
         await dp.feed_update(bot, cb(9, "buy:reg:0", UID))
         assert "Выбрано: <b>2</b>" in s.texts()[-1] and "✅ 95.182.87.#" in [b.text for b in buttons(s)]
         await dp.feed_update(bot, cb(10, "buy:ipt:0", UID))  # drop 94.103.80
+        before = len(s.calls)
         await dp.feed_update(bot, cb(11, "buy:ipsave", UID))
         assert await db.get_preset("hostvds", "eu-west2") == ["95.182.87"]
+        await asyncio.gather(*notify._TASKS)
+        assert not any("Найдены новые" in getattr(c, "text", "") for c in s.calls[before:]), "nothing new → silent"
 
         # locations with saved subnets get a ⭐ and come first
         regs = [("eu-west1", "🇩🇪 Frankfurt · eu-west1", True, ""), ("eu-west2", "🇳🇱 Amsterdam · eu-west2", True, "")]

@@ -15,7 +15,7 @@ from .. import db, geo
 from ..buyer import PurchaseJob, run_purchase
 from ..scanner import ScanJob, run_scan
 from ..config import config
-from .. import os_names, sshkey
+from .. import notify, os_names, sshkey
 from ..providers import PROVIDER_NAMES, RESERVE_PROVIDERS, SCOUT_PROVIDERS, SSH_KEY_PROVIDERS, SUBNET_PROVIDERS, Flavor, IpPool, ProviderError
 from ..providers.base import normalize_ssh_key, prefix24, subnet_blocks
 from ..providers.hostvds_public import money
@@ -254,7 +254,7 @@ def _admin_rows(data: dict, total: int) -> list[list[Btn]]:
 
 
 @router.callback_query(F.data.in_({"buy:ipsave", "buy:ipunsave"}))
-async def ip_save_preset(cb: CallbackQuery, state: FSMContext):
+async def ip_save_preset(cb: CallbackQuery, state: FSMContext, bot: Bot):
     if not is_admin(cb.from_user.id):
         return await cb.answer("⛔ Только для админа", show_alert=True)
     data = await state.get_data()
@@ -262,9 +262,15 @@ async def ip_save_preset(cb: CallbackQuery, state: FSMContext):
         return await cb.answer("🔁 Начните покупку заново", show_alert=True)
     prefixes = ([] if cb.data == "buy:ipunsave" else
                 [data["pools"][i]["prefix"] for i in data.get("selected", [])] + data.get("custom", []))
-    await db.set_preset(data["provider"], data["region"], data.get("region_label", data["region"]), prefixes)
+    old = set(await db.get_preset(data["provider"], data["region"]))
+    label = data.get("region_label", data["region"])
+    await db.set_preset(data["provider"], data["region"], label, prefixes)
     await state.update_data(preset=prefixes)
-    await cb.answer(f"📌 Сохранено: {len(prefixes)} — пользователи покупают из этих подсетей" if prefixes
+    new = [p for p in prefixes if p not in old]
+    if new:  # new working subnets → everyone who ever wrote to the bot hears about it
+        notify.announce_subnets(bot, cb.from_user.id, PROVIDER_NAMES[data["provider"]], label)
+    await cb.answer((f"📌 Сохранено: {len(prefixes)} — пользователи покупают из этих подсетей"
+                     + ("\n📣 Всем отправлено уведомление" if new else "")) if prefixes
                     else "🗑 Подсети убраны — пользователи здесь не купят", show_alert=True)
     await render_ip_screen(cb.message, state, edit=True)
 

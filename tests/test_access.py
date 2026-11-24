@@ -63,6 +63,7 @@ async def scenario():
     print(landing, "\n")
     assert "бот для покупки VPS-серверов у разных провайдеров" in landing and "@oldarsi" in landing
     assert "<code>2002</code>" in landing, "the guest's ID is shown so they can send it to the admin"
+    assert GUEST in await db.broadcast_recipients(), "everyone who wrote to the bot gets announcements"
     assert "HostVDS" not in landing and "Selectel" not in landing, "providers are not listed"
     buttons = last_markup(s)
     assert len(buttons) == 1 and buttons[0].url == "https://t.me/oldarsi" and buttons[0].text == "💬 Написать админу"

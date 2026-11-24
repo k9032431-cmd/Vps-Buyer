@@ -71,6 +71,9 @@ async def _show_landing(event: Update, user: User) -> None:
         await event.message.answer(landing_text(user), reply_markup=landing_kb())
 
 
+_VISITORS: set[int] = set()
+
+
 class AccessMiddleware(BaseMiddleware):
     """Outer middleware: approved users and admins go on; everyone else gets the landing screen."""
 
@@ -78,6 +81,12 @@ class AccessMiddleware(BaseMiddleware):
         user: User | None = data.get("event_from_user")
         if not user:
             return None
+        if user.id not in _VISITORS:  # remembered once per run: announcements reach everyone who wrote
+            try:
+                await db.touch_visitor(user.id, user.username or "", user.full_name)
+                _VISITORS.add(user.id)
+            except Exception:
+                log.exception("can't remember visitor %s", user.id)
         if await has_access(user.id):
             return await handler(event, data)
         try:

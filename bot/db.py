@@ -71,6 +71,13 @@ CREATE TABLE IF NOT EXISTS check_blocks (
     failed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (provider, region, block)
 );
+CREATE TABLE IF NOT EXISTS visitors (    -- everyone who ever wrote to the bot (with or without access)
+    user_id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL DEFAULT '',
+    full_name TEXT NOT NULL DEFAULT '',
+    first_seen TEXT DEFAULT CURRENT_TIMESTAMP,
+    blocked INTEGER NOT NULL DEFAULT 0  -- the person blocked the bot: no more broadcasts
+);
 CREATE TABLE IF NOT EXISTS presets (     -- subnets the admin chose for everyone, per provider + location
     provider TEXT NOT NULL,
     region TEXT NOT NULL,
@@ -379,3 +386,31 @@ async def list_presets() -> list[tuple[str, str, str, list[str]]]:
         rows = await (await db.execute(
             "SELECT provider, region, label, prefixes FROM presets ORDER BY provider, label")).fetchall()
     return [(p, r, label, json.loads(x)) for p, r, label, x in rows]
+
+
+# ---------- everyone who used the bot (for announcements) ----------
+async def touch_visitor(user_id: int, username: str, full_name: str) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute(
+            "INSERT INTO visitors (user_id, username, full_name) VALUES (?,?,?) ON CONFLICT(user_id) DO UPDATE "
+            "SET username=excluded.username, full_name=excluded.full_name, blocked=0",
+            (user_id, username or "", full_name or ""))
+        await db.commit()
+
+
+async def broadcast_recipients() -> list[int]:
+    """Visitors who haven't blocked the bot, plus users and account owners known from before visitors existed."""
+    async with aiosqlite.connect(config.db_path) as db:
+        rows = await (await db.execute(
+            "SELECT user_id FROM visitors WHERE blocked=0 UNION SELECT user_id FROM users "
+            "WHERE user_id NOT IN (SELECT user_id FROM visitors WHERE blocked=1) "
+            "UNION SELECT user_id FROM accounts WHERE user_id NOT IN (SELECT user_id FROM visitors WHERE blocked=1)"
+        )).fetchall()
+    return sorted(r[0] for r in rows)
+
+
+async def mark_blocked(user_id: int) -> None:
+    async with aiosqlite.connect(config.db_path) as db:
+        await db.execute("INSERT INTO visitors (user_id, blocked) VALUES (?, 1) "
+                         "ON CONFLICT(user_id) DO UPDATE SET blocked=1", (user_id,))
+        await db.commit()
