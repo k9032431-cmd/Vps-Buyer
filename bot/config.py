@@ -35,6 +35,8 @@ class Config:
     linode_api_url: str = os.getenv("LINODE_API_URL", "https://api.linode.com/v4")
     linode_geofeed_url: str = os.getenv("LINODE_GEOFEED_URL", "https://geoip.linode.com/")
     civo_api_url: str = os.getenv("CIVO_API_URL", "https://api.civo.com/v2")
+    # Tencent Cloud API host (cvm.<host>, vpc.<host>)
+    tencent_api_host: str = os.getenv("TENCENT_API_HOST", "tencentcloudapi.com")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     # 0 = no limit (stop with the ⛔ button).
     # (old MAX_ATTEMPTS from earlier installs is ignored on purpose — it defaulted to 50)
