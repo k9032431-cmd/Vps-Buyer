@@ -7,29 +7,27 @@ from .hetzner import HetznerClient
 from .hostvds import HostVDSClient
 from .linode import LinodeClient
 from .selectel import SelectelVDSClient
-from .tencent import TencentClient
 from .serverspace import ServerspaceClient
 from .timeweb import TimewebClient
 from .vultr import VultrClient
 
 # Shown in the bot (buy / accounts menus), in this order.
 PROVIDERS = {"hostvds": "HostVDS", "digitalocean": "DigitalOcean", "hetzner": "Hetzner", "vultr": "Vultr",
-             "linode": "Linode", "civo": "Civo", "tencent": "Tencent Cloud"}
+             "linode": "Linode", "civo": "Civo"}
 # Every provider the bot can still talk to — hidden ones stay so servers bought there can be deleted.
 PROVIDER_NAMES = {**PROVIDERS, "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
                   "serverspace": "Serverspace"}
 # Providers without a subnet list: blocks are learned from servers and IP scouting.
-SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr", "civo", "tencent"}
+SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr", "civo"}
 # Providers that reserve a standalone IP and build a server on it (fast, almost free IP hunting / scouting).
-RESERVE_PROVIDERS = {"hetzner", "vultr", "civo", "tencent"}
+RESERVE_PROVIDERS = {"hetzner", "vultr", "civo"}
 # Providers connected with a single API token (stored in Account.password).
-TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean", "hetzner", "vultr", "linode", "civo",
-                   "tencent"}
+TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean", "hetzner", "vultr", "linode", "civo"}
 # Providers whose full subnet list is known up front from a geofeed (prefixes are CIDRs, chosen by mask).
 SUBNET_PROVIDERS = {"digitalocean", "hetzner", "vultr", "linode"}
 # Providers that can put your SSH public key on a new server (Aeza's order API has no way to pass one).
 SSH_KEY_PROVIDERS = {"hostvds", "selectel", "timeweb", "serverspace", "digitalocean", "hetzner", "vultr",
-                     "linode", "civo", "tencent"}
+                     "linode", "civo"}
 
 _CLIENTS = {
     "selectel": lambda t: SelectelVDSClient(t, config.selectel_api_url),
@@ -41,7 +39,6 @@ _CLIENTS = {
     "vultr": lambda t: VultrClient(t, config.vultr_api_url),
     "linode": lambda t: LinodeClient(t, config.linode_api_url),
     "civo": lambda t: CivoClient(t, config.civo_api_url),
-    "tencent": lambda t: TencentClient(t),
 }
 
 

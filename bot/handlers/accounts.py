@@ -95,11 +95,6 @@ TOKEN_HELP = {
     "civo": ("1️⃣ Откройте dashboard.civo.com → <b>Settings → Profile → Security</b>.\n"
              "2️⃣ Скопируйте API key.\n"
              "3️⃣ Отправьте ключ сюда."),
-    "tencent": ("1️⃣ Откройте console.tencentcloud.com → <b>Access Management (CAM) → API Keys</b>.\n"
-                "2️⃣ Создайте ключ — будут <b>SecretId</b> и <b>SecretKey</b>.\n"
-                "3️⃣ Отправьте их сюда <b>одним сообщением через пробел</b>:\n"
-                "<code>SecretId SecretKey</code>\n\n"
-                "💡 Нужен аккаунт Tencent Cloud International с верификацией и балансом — серверы почасовые."),
     "aeza": ("1️⃣ Откройте my.aeza.net → <b>Настройки → API</b>.\n"
              "2️⃣ Создайте API-ключ.\n"
              "3️⃣ Отправьте ключ сюда.\n\n"
