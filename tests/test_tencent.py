@@ -52,7 +52,10 @@ def fake_tencent(eip_ips):
         elif action == "DescribeImages":
             r["ImageSet"] = [{"ImageId": "img-ubuntu", "OsName": "Ubuntu Server 22.04 LTS 64bit", "Platform": "Ubuntu"},
                              {"ImageId": "img-win", "OsName": "Windows Server 2022", "Platform": "Windows"}]
+        elif action == "AllocateAddresses" and st.get("eip_quota") is not None and len(st["eips"]) >= st["eip_quota"]:
+            r = {"Error": {"Code": "AddressQuotaLimitExceeded.DailyAllocate", "Message": "daily quota"}}
         elif action == "AllocateAddresses":
+            assert p["InternetChargeType"] == "TRAFFIC_POSTPAID_BY_HOUR" and p["InternetMaxBandwidthOut"] >= 10
             eid = f"eip-{len(st['eips'])}"
             st["eips"][eid] = {"AddressId": eid, "AddressIp": next(eip_ips), "AddressStatus": "UNBIND",
                                "InstanceId": None}
@@ -67,8 +70,7 @@ def fake_tencent(eip_ips):
             r["AddressSet"] = items
         elif action == "ReleaseAddresses":
             eid = p["AddressIds"][0]
-            if st["eips"][eid]["InstanceId"] in st["instances"] and \
-                    st["eips"][eid]["InstanceId"] not in st["terminated"]:
+            if st["eips"][eid]["InstanceId"]:  # only UNBIND EIPs can be released
                 r = {"Error": {"Code": "InvalidAddressState", "Message": "bound"}}
             else:
                 st["released"].append(eid)
@@ -78,7 +80,15 @@ def fake_tencent(eip_ips):
             st["sg"].append("sg-1")
             r["SecurityGroup"] = {"SecurityGroupId": "sg-1"}
         elif action == "CreateSecurityGroupPolicies":
-            st["rules"].append(p)
+            if len(p["SecurityGroupPolicySet"]) != 1:
+                r = {"Error": {"Code": "InvalidParameter", "Message": "one direction per call"}}
+            else:
+                st["rules"].append(p)
+        elif action == "DescribeAddressQuota":
+            r["QuotaSet"] = [{"QuotaId": "DAILY_EIP_APPLY", "QuotaCurrent": 3, "QuotaLimit": 40}]
+        elif action == "DisassociateAddress":
+            e = st["eips"][p["AddressId"]]
+            e["InstanceId"], e["AddressStatus"] = None, "UNBIND"
         elif action == "RunInstances":
             st["run"].append(p)
             iid = f"ins-{len(st['instances'])}"
@@ -97,7 +107,9 @@ def fake_tencent(eip_ips):
             r["InstanceSet"] = [i for i in items if i["InstanceId"] not in st["terminated"]]
         elif action == "AssociateAddress":
             inst = st["instances"][p["InstanceId"]]
-            if inst["InstanceState"] != "RUNNING":
+            if inst["PublicIpAddresses"]:
+                r = {"Error": {"Code": "InvalidInstanceId.AlreadyHasPublicIp", "Message": "has a public IP"}}
+            elif inst["InstanceState"] != "RUNNING":
                 r = {"Error": {"Code": "InvalidInstanceState", "Message": "not running"}}
             else:
                 st["assoc"].append((p["AddressId"], p["InstanceId"]))
@@ -132,7 +144,8 @@ async def scenario():
                 assert e.status == 401 and "SecretKey" in str(e)
         assert type(make_client("tencent", "", SECRET, "")).__name__ == "TencentClient"
         async with tencent.TencentClient(SECRET, base_url=base) as c:
-            assert (await c.check()).startswith("AKIDtest12")
+            info = await c.check()
+            assert info.startswith("AKIDtest12") and "EIP сегодня: 3/40" in info, info
             regs = {r.region: r for r in await c.region_statuses()}
             assert regs["eu-frankfurt"].available and regs["eu-frankfurt"].country == "DE"
             assert regs["eu-frankfurt"].city == "Франкфурт" and not regs["eu-moscow"].available
@@ -150,12 +163,13 @@ async def scenario():
             assert kept.admin_pass and len(st["run"]) == 1, "one server, built only for the right IP"
             run = st["run"][0]
             assert run["InternetAccessible"]["PublicIpAssigned"] is False and run["Placement"]["Zone"] == "eu-frankfurt-2"
+            assert run["InternetAccessible"]["InternetMaxBandwidthOut"] == 0, "no own public IP, or the EIP can't bind"
             assert run["InstanceChargeType"] == "POSTPAID_BY_HOUR" and run["SecurityGroupIds"] == ["sg-1"]
             assert run["LoginSettings"]["Password"] == kept.admin_pass
             script = base64.b64decode(run["UserData"]).decode()
             assert BOT in script and "ufw disable" in script and "PasswordAuthentication yes" in script
-            assert st["rules"][0]["SecurityGroupPolicySet"]["Ingress"][0] == {"Protocol": "ALL", "CidrBlock": "0.0.0.0/0",
-                                                                              "Action": "ACCEPT"}
+            rule = {"Protocol": "ALL", "CidrBlock": "0.0.0.0/0", "Action": "ACCEPT"}
+            assert [r["SecurityGroupPolicySet"] for r in st["rules"]] == [{"Ingress": [rule]}, {"Egress": [rule]}]
             good = next(k for k, e in st["eips"].items() if e["AddressIp"] == "43.156.5.7")
             assert st["assoc"] == [(good, kept.id)], "EIP bound once the server runs"
             assert set(st["released"]) == set(st["eips"]) - {good}, "wrong EIPs released"
@@ -166,6 +180,16 @@ async def scenario():
             await c.delete_server("eu-frankfurt", kept.id)
         await tencent.wait_pending(5)
         assert st["terminated"] == [kept.id] and good in st["released"], "server and its EIP are gone"
+
+        # daily EIP quota used up → the purchase goes on with servers (own public IP), not a stop
+        st["eip_quota"] = len(st["eips"])
+        async with tencent.TencentClient(SECRET, base_url=base) as c:
+            fl = (await c.list_flavors("eu-frankfurt"))[0]
+            job = PurchaseJob("eu-frankfurt", fl, "img-ubuntu", None, ["1.1.1"], 1, max_attempts=0, parallel=1,
+                              active_timeout=30, boot_volume_gb=10, port_parallel=3)
+            await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+        assert not job.error and job.mode == "servers" and [k.ipv4[0] for k in job.kept] == ["1.1.1.1"], job.log
+        assert any("Лимит резервных IP" in line for line in job.log)
     finally:
         await srv.close()
 

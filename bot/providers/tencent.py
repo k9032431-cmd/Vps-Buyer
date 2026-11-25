@@ -136,6 +136,9 @@ class TencentClient:
             elif code.startswith("ResourceNotFound") or code.startswith("InvalidInstanceId.NotFound") \
                     or code in ("InvalidAddressId.NotFound", "InvalidParameterValue.AddressIdNotFound"):
                 status = 404
+            elif action == "AllocateAddresses" and ("Quota" in code or "LimitExceeded" in code):
+                # EIP quota (20 per region, ~40 allocations a day by default): IP hunting must give way to servers
+                status, msg = 403, f"лимит EIP аккаунта ({msg})"
             elif any(code.startswith(c) or c in code for c in BUSY_CODES):
                 status = 429
             else:
@@ -147,7 +150,16 @@ class TencentClient:
     async def check(self) -> str:
         regions = await self.call("cvm", "DescribeRegions", "ap-singapore")
         n = len([r for r in regions.get("RegionSet", []) if r.get("RegionState") == "AVAILABLE"])
-        return f"{self.secret_id[:10]}…, регионов: {n}"
+        info = f"{self.secret_id[:10]}…, регионов: {n}"
+        try:
+            quota = {q["QuotaId"]: q for q in (await self.call("vpc", "DescribeAddressQuota", "ap-singapore"))
+                     .get("QuotaSet", [])}
+            daily = quota.get("DAILY_EIP_APPLY")
+            if daily:
+                info += f", EIP сегодня: {daily.get('QuotaCurrent', 0)}/{daily.get('QuotaLimit', '?')}"
+        except ProviderError:
+            pass
+        return info
 
     # ---------- regions ----------
     async def region_statuses(self) -> list[RegionStatus]:
@@ -208,7 +220,9 @@ class TencentClient:
         return (await self.call("vpc", "DescribeAddresses", region, params)).get("AddressSet", [])
 
     async def create_port(self, region: str, network_id: str | None, subnet_id: str | None) -> tuple[str, str]:
-        data = await self.call("vpc", "AllocateAddresses", region, {"AddressCount": 1})
+        # traffic-billed, so the bandwidth is only a cap (standard accounts default to 1 Mbps otherwise)
+        data = await self.call("vpc", "AllocateAddresses", region, {
+            "AddressCount": 1, "InternetChargeType": "TRAFFIC_POSTPAID_BY_HOUR", "InternetMaxBandwidthOut": 100})
         eid = (data.get("AddressSet") or [None])[0]
         if not eid:
             raise ProviderError("Tencent AllocateAddresses: EIP не выдан")
@@ -240,9 +254,11 @@ class TencentClient:
         else:
             sg = (await self.call("vpc", "CreateSecurityGroup", region, {
                 "GroupName": SECURITY_GROUP, "GroupDescription": "VPS Buyer: all traffic allowed"}))["SecurityGroup"]["SecurityGroupId"]
+            # a fresh group denies everything; one call may add rules for one direction only
             rule = {"Protocol": "ALL", "CidrBlock": "0.0.0.0/0", "Action": "ACCEPT"}
-            await self.call("vpc", "CreateSecurityGroupPolicies", region, {
-                "SecurityGroupId": sg, "SecurityGroupPolicySet": {"Ingress": [rule], "Egress": [rule]}})
+            for direction in ("Ingress", "Egress"):
+                await self.call("vpc", "CreateSecurityGroupPolicies", region, {
+                    "SecurityGroupId": sg, "SecurityGroupPolicySet": {direction: [rule]}})
         self._sg[region] = sg
         return sg
 
@@ -266,7 +282,10 @@ class TencentClient:
             "InstanceChargeType": "POSTPAID_BY_HOUR", "Placement": {"Zone": zone}, "InstanceType": itype,
             "ImageId": image_id, "InstanceName": name, "InstanceCount": 1,
             "SystemDisk": {"DiskType": "CLOUD_PREMIUM", "DiskSize": max(20, boot_volume_gb)},
-            "InternetAccessible": {"InternetChargeType": "TRAFFIC_POSTPAID_BY_HOUR", "InternetMaxBandwidthOut": 10,
+            # with an EIP to bind the server must have no public IP of its own (bandwidth 0); otherwise a
+            # traffic-billed public IP, bandwidth only a cap
+            "InternetAccessible": {"InternetChargeType": "TRAFFIC_POSTPAID_BY_HOUR",
+                                   "InternetMaxBandwidthOut": 0 if port_id else 100,
                                    "PublicIpAssigned": not port_id},
             "LoginSettings": {"Password": password},
             "SecurityGroupIds": [await self._security_group(region)],
@@ -321,6 +340,11 @@ class TencentClient:
         pending = self._bind.pop(server_id, None)
         if pending and pending not in eips:
             eips.append(pending)
+        for eid in eips:  # only an unbound EIP can be released
+            try:
+                await self.call("vpc", "DisassociateAddress", region, {"AddressId": eid})
+            except ProviderError:
+                pass
         try:
             await self.call("cvm", "TerminateInstances", region, {"InstanceIds": [server_id]})
         except ProviderError as e:
