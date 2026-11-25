@@ -15,7 +15,7 @@ import aiohttp
 
 from ..config import config
 from . import geofeed
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, ssh_key_script
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, merge_scripts, open_access_script, ssh_key_script
 
 log = logging.getLogger(__name__)
 API_URL = "https://api.vultr.com/v2"
@@ -205,8 +205,10 @@ class VultrClient:
         body = {"region": region, "plan": flavor.id, "os_id": int(image_id), "label": name, "hostname": name,
                 "enable_ipv6": False, "backups": "disabled",
                 **({"sshkey_id": ids} if ids else {}), **({"reserved_ipv4": port_id} if port_id else {})}
-        if keys and len(ids) < len(keys):  # some keys could not be uploaded: install them on first boot
-            body["user_data"] = base64.b64encode(ssh_key_script(keys).encode()).decode()
+        # all ports open, password logins on (password servers); keys that could not be uploaded go in too
+        script = merge_scripts(open_access_script(not ssh_key),
+                               ssh_key_script(keys) if keys and len(ids) < len(keys) else None)
+        body["user_data"] = base64.b64encode(script.encode()).decode()
         srv = self._server((await self._request("POST", "/instances", body))["instance"])
         if ssh_key:
             srv.admin_pass = None  # you chose your own key

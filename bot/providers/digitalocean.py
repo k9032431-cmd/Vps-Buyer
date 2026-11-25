@@ -18,7 +18,7 @@ import aiohttp
 from passlib.hash import sha512_crypt
 
 from ..config import config
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, merge_scripts, ssh_key_script
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, merge_scripts, open_access_script, ssh_key_script
 
 API_URL = "https://api.digitalocean.com/v2"
 
@@ -75,8 +75,9 @@ def password_script(password: str) -> str:
     pw_hash = sha512_crypt.using(rounds=5000).hash(password)
     return "\n".join([
         "#!/bin/bash",
-        f"((sleep 15; printf %s {shlex.quote('root:' + pw_hash)} | chpasswd --encrypted; "
-        "chage -d \"$(date +%F)\" root; passwd -u root)&",
+        f"(sleep 15; printf %s {shlex.quote('root:' + pw_hash)} | chpasswd --encrypted; "
+        "chage -d \"$(date +%F)\" root; passwd -u root) &",
+        *open_access_script(True).splitlines()[1:],
     ])
 
 

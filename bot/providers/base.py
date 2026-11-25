@@ -143,3 +143,21 @@ def merge_scripts(*scripts: str | None) -> str:
         if s:
             body += [line for line in s.splitlines() if not line.startswith("#!")]
     return "\n".join(["#!/bin/bash", *body])
+
+
+def open_access_script(password_login: bool) -> str:
+    """First-boot script: switch off the OS firewall (ufw) so every port is reachable and, for password
+    servers, make sure root can log in with a password — some images (DigitalOcean with SSH keys in the
+    order, cloud-init's 50-cloud-init.conf…) turn password logins off. Runs after cloud-init is done."""
+    lines = ["#!/bin/bash", "(sleep 20", "ufw disable >/dev/null 2>&1 || true"]
+    if password_login:
+        lines += [
+            "mkdir -p /etc/ssh/sshd_config.d",
+            "printf 'PasswordAuthentication yes\\nKbdInteractiveAuthentication yes\\nPermitRootLogin yes\\n' "
+            "> /etc/ssh/sshd_config.d/00-vps-buyer.conf",
+            "sed -i -E 's/^#?[[:space:]]*(PasswordAuthentication|PermitRootLogin)[[:space:]].*/\\1 yes/' "
+            "/etc/ssh/sshd_config /etc/ssh/sshd_config.d/*.conf 2>/dev/null",
+            "systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || service ssh restart 2>/dev/null",
+        ]
+    lines.append(")&")
+    return "\n".join(lines)

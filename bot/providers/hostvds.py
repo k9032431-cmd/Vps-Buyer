@@ -13,7 +13,7 @@ from passlib.hash import sha512_crypt
 
 from . import hostvds_public as public
 from .base import (Flavor, Image, IpPool, ProviderError, RegionStatus, Server, blocks24, merge_scripts,
-                   ssh_key_script)
+                   open_access_script, ssh_key_script)
 
 COMPUTE_MICROVERSION = "compute 2.47"
 
@@ -41,8 +41,9 @@ def password_script(password: str, user: str = "root") -> str:
     pw_hash = sha512_crypt.using(rounds=5000).hash(password)
     return "\n".join([
         "#!/bin/bash",
-        f"((sleep 15; printf %s {shlex.quote(f'{user}:{pw_hash}')} | chpasswd --encrypted) "
-        f"&& passwd -u {shlex.quote(user)})&",
+        f"( (sleep 15; printf %s {shlex.quote(f'{user}:{pw_hash}')} | chpasswd --encrypted) "
+        f"&& passwd -u {shlex.quote(user)} ) &",
+        *open_access_script(True).splitlines()[1:],
     ])
 
 

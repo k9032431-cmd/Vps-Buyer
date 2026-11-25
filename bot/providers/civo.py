@@ -13,7 +13,7 @@ import time
 
 import aiohttp
 
-from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, prefix24, ssh_key_script
+from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server, merge_scripts, open_access_script, prefix24, ssh_key_script
 
 API_URL = "https://api.civo.com/v2"
 CITIES = {"LON1": ("GB", "Лондон"), "NYC1": ("US", "Нью-Йорк"), "FRA1": ("DE", "Франкфурт"),
@@ -192,8 +192,8 @@ class CivoClient:
         if key_id:
             body["ssh_key_id"] = key_id
         rest = ([] if key_id else ([ssh_key] if ssh_key else [])) + list(extra_keys or [])
-        if rest:  # Civo takes one key id; any other key goes in by the first-boot script
-            body["script"] = ssh_key_script(rest)
+        # Civo takes one key id; any other key goes in by the first-boot script, which also opens access
+        body["script"] = merge_scripts(open_access_script(not ssh_key), ssh_key_script(rest) if rest else None)
         srv = self._server(await self._request("POST", "/instances", body))
         self._regions_of[srv.id] = region
         if port_id:
