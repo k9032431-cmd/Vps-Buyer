@@ -1,4 +1,6 @@
-from aiogram import F, Router
+import json
+
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton as Btn, Message
@@ -95,6 +97,13 @@ TOKEN_HELP = {
     "civo": ("1️⃣ Откройте dashboard.civo.com → <b>Settings → Profile → Security</b>.\n"
              "2️⃣ Скопируйте API key.\n"
              "3️⃣ Отправьте ключ сюда."),
+    "gcp": ("1️⃣ Откройте console.cloud.google.com → создайте <b>проект</b> и привяжите к нему "
+            "<b>платёжный аккаунт</b> (Billing).\n"
+            "2️⃣ <b>APIs & Services → Library</b> → включите <b>Compute Engine API</b>.\n"
+            "3️⃣ <b>IAM & Admin → Service Accounts → Create</b>, роль <b>Compute Admin</b>.\n"
+            "4️⃣ У сервисного аккаунта: <b>Keys → Add key → Create new key → JSON</b> — скачается файл.\n"
+            "5️⃣ Отправьте этот <b>.json файл</b> сюда (как документ).\n\n"
+            "💡 Бот берёт сначала только IP (статический), сервер создаёт лишь на IP из нужных подсетей."),
     "aeza": ("1️⃣ Откройте my.aeza.net → <b>Настройки → API</b>.\n"
              "2️⃣ Создайте API-ключ.\n"
              "3️⃣ Отправьте ключ сюда.\n\n"
@@ -135,8 +144,22 @@ async def add_password(message: Message, state: FSMContext):
 
 
 @router.message(AddAccount.token)
-async def add_token(message: Message, state: FSMContext):
-    await _save(message, state, None, message.text.strip(), "")
+async def add_token(message: Message, state: FSMContext, bot: Bot):
+    if message.document:  # Google Cloud: the service account key comes as a .json file
+        if message.document.file_size and message.document.file_size > 100_000:
+            return await message.answer("⚠️ Файл слишком большой — нужен JSON-ключ сервисного аккаунта.")
+        buf = await bot.download(message.document)
+        secret = buf.read().decode("utf-8", "replace")
+        try:
+            secret = json.dumps(json.loads(secret))  # compact, one line
+        except ValueError:
+            pass
+    elif message.text:
+        secret = message.text.strip()
+    else:
+        return await message.answer("⚠️ Отправьте ключ текстом" + (" или файлом" if
+                                    (await state.get_data()).get("provider") == "gcp" else "") + ".")
+    await _save(message, state, None, secret, "")
 
 
 async def _save(message: Message, state: FSMContext, username: str | None, secret: str, project: str):
