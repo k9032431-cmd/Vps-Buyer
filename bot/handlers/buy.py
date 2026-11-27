@@ -502,7 +502,8 @@ async def render_ip_screen(msg: Message, state: FSMContext, edit: bool):
             f"📍 {hd.quote(data['region_label'])} · блоков: <b>{len(pools)}</b>\n\n")
     if pools:
         text += "\n".join(f"{'✅' if i in selected else _work_mark(p) or '▫️'} <code>{p['prefix']}.#</code>"
-                          + (f" · свободно {p['free']}" if p.get("free") else "") + _work_note(p)
+                          + (f" · свободно {p['free']}" if p.get("free") else "")
+                          + (f" · выпадал {p['hits']}×" if p.get("hits") else "") + _work_note(p)
                           for i, p in enumerate(pools[:150]))
         if len(pools) > 150:
             text += f"\n… и ещё {len(pools) - 150}"
@@ -579,6 +580,7 @@ def _merge_seen(pools: list[IpPool], seen: list[str], subnets: list[str] = ()) -
         if prefix not in known:
             known[prefix] = IpPool(prefix, None, [])
         pool = known[prefix]
+        pool.hits += 1
         if pool.network_id is None and len(pool.cidrs) < 5 and ip not in pool.cidrs:
             pool.cidrs.append(ip)
     return sorted(known.values(), key=lambda p: tuple(int(x) for x in p.prefix.split(".")))
@@ -1152,7 +1154,8 @@ async def cancel(cb: CallbackQuery):
 
 # ---------- IP scouting (Selectel VDS: no subnet API) ----------
 SCAN_SIZES = (5, 10, 20)
-SCAN_CURRENCY = {"selectel": "₽", "timeweb": "₽", "aeza": "€", "serverspace": "₽"}
+SCAN_CURRENCY = {"selectel": "₽", "timeweb": "₽", "aeza": "€", "serverspace": "₽", "ovh": "€", "gcp": "$",
+                 "digitalocean": "$", "linode": "$", "civo": "$", "hetzner": "€", "vultr": "$"}
 
 
 @router.callback_query(F.data == "buy:scan")
@@ -1188,7 +1191,9 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
         "4️⃣ в конце пришлёт отчёт: какие блоки <code>a.b.c.#</code> сейчас выдаются\n\n"
         f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} {cur}/час\n"
         "💸 Оплата почасовая — каждый пробный сервер обходится примерно в час тарифа.\n\n"
-        "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP.",
+        "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP."
+        + ("\n\n⚡ Сначала бот попробует брать IP <b>без серверов</b> (почти бесплатно) — серверы "
+           "понадобятся, только если провайдер это не разрешит." if data["provider"] == "ovh" else ""),
         reply_markup=kb(*rows))
 
 

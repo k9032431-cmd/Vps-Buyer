@@ -124,6 +124,16 @@ async def scenario():
             assert len(st["servers"]) == 1 and next(iter(st["servers"].values()))["port"] is not None
             good = next(p for p, ip in st["ports"].items() if ip == "57.129.7.7")
             assert set(st["deleted_ports"]) == set(st["ports"]) - {good}
+            # scouting: IPs only, no servers; the blocks then show up in the IP picker with their counts
+            from bot.handlers.buy import _merge_seen
+            from bot.scanner import ScanJob, run_scan
+            before = len(st["servers"])
+            scan = ScanJob("GRA11", flavors[0], "img", 4)
+            await run_scan(c, scan, lambda j: ORIG_SLEEP(0))
+            assert len(scan.ips) == 4 and len(st["servers"]) == before, "no server bought while scouting"
+            pools = {p.prefix: p.hits for p in _merge_seen([], scan.ips)}
+            assert pools["51.75.1"] >= 1 and set(pools) <= {"51.75.1", "51.75.2", "57.129.7"}
+            assert (await c.cheapest_plan("GRA11"))[1] == ovh.PRICES["d2-2"], "per hour"
             assert "chpasswd" in __import__("base64").b64decode(
                 next(iter(st["servers"].values()))["body"]["user_data"]).decode()
     finally:
@@ -143,6 +153,12 @@ async def scenario():
         assert not job.error and job.mode == "servers" and [k.ipv4[0] for k in job.kept] == ["57.128.0.9"], job.log
         body = next(iter(st["servers"].values()))["body"]
         assert body["networks"] == [{"uuid": "ext"}], "server mode puts the server on Ext-Net"
+        # scouting where ports are refused: falls back to cheapest servers
+        from bot.scanner import ScanJob, run_scan
+        async with ovh.OVHClient(url, "user-x", "pw", PROJECT) as c:
+            scan = ScanJob("GRA11", fl, "img", 2)
+            await run_scan(c, scan, lambda j: ORIG_SLEEP(0))
+        assert scan.no_ports and scan.ips == ["57.128.0.9", "57.128.0.9"] and scan.deleted == 2, scan.log
     finally:
         await srv.close()
 

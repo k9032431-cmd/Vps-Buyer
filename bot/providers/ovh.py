@@ -67,7 +67,7 @@ class OVHClient(HostVDSClient):
         flavors = await self.list_flavors(region)
         if not flavors:
             raise ProviderError("В этой локации нет тарифов")
-        return flavors[0], PRICES.get(flavors[0].name, 0.01) * 730
+        return flavors[0], PRICES.get(flavors[0].name, 0.01)  # per hour
 
     async def _public_net(self, region: str) -> str:
         nets = (await self._request("GET", "network", region, "/networks", params={"name": PUBLIC_NET}))["networks"]

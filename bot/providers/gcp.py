@@ -222,7 +222,7 @@ class GCPClient:
         flavors = await self.list_flavors(region)
         if not flavors:
             raise ProviderError("В этой локации нет тарифов")
-        return flavors[0], TYPES[flavors[0].name] * 730
+        return flavors[0], TYPES[flavors[0].name]  # per hour
 
     async def list_images(self, region: str, flavor: Flavor | None = None) -> list[Image]:
         return [Image(i, name) for i, name in IMAGES]

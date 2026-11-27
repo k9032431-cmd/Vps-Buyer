@@ -37,6 +37,7 @@ class ScanJob:
     started: float = field(default_factory=time.time)
     task: asyncio.Task | None = field(default=None, repr=False, compare=False)  # the running scan
     finished_probes: int = 0
+    no_ports: bool = False     # the provider refused IP-only probes: buy servers instead
 
     def eta_seconds(self) -> float | None:
         if not self.finished_probes:
@@ -55,9 +56,17 @@ def _fatal(e: BaseException) -> bool:
 async def _probe(client, job: ScanJob) -> None:
     if job.cancelled or job.error:
         return
-    if getattr(client, "reserves_ips", False):
-        # Hetzner / Vultr: reserve a standalone IP, note it, release it — no server is bought at all
-        port_id, ip = await client.create_port(job.region, None, None)
+    ip_only = getattr(client, "reserves_ips", False) or getattr(client, "ports_anywhere", False)
+    if ip_only and not job.no_ports:
+        # Hetzner / Vultr / OVH: take a standalone IP (port), note it, release it — no server is bought
+        try:
+            port_id, ip = await client.create_port(job.region, None, None)
+        except ProviderError as e:
+            if getattr(client, "reserves_ips", False) or e.status == 429:
+                raise
+            job.no_ports = True  # OVH refuses ports on its public network → probe with servers
+            job.log.append("ℹ️ IP без сервера взять нельзя — разведываю через серверы")
+            return await _probe(client, job)
         job.created += 1
         try:
             if ip:
