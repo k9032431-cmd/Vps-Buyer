@@ -20,6 +20,11 @@ COMPUTE_MICROVERSION = "compute 2.47"
 
 HostVDSError = ProviderError
 
+
+def _is_id(value: str) -> bool:
+    """OpenStack project ids are 32 hex characters (OVH gives the id, HostVDS the name)."""
+    return len(value) == 32 and all(c in "0123456789abcdef" for c in value.lower())
+
 SECURITY_GROUP = "allow_all"   # the group the HostVDS panel attaches to every new server
 
 
@@ -75,7 +80,8 @@ class HostVDSClient:
         body = {"auth": {
             "identity": {"methods": ["password"], "password": {"user": {
                 "name": self.username, "domain": {"name": self.user_domain}, "password": self.password}}},
-            "scope": {"project": {"name": self.project_name, "domain": {"id": self.project_domain_id}}},
+            "scope": {"project": {"id": self.project_name} if _is_id(self.project_name)
+                      else {"name": self.project_name, "domain": {"id": self.project_domain_id}}},
         }}
         async with self._session.post(f"{self.auth_url}/v3/auth/tokens", json=body) as r:
             if r.status not in (200, 201):
@@ -186,11 +192,7 @@ class HostVDSClient:
         nets = (await self._request("GET", "network", region, "/networks"))["networks"]
         subnets = (await self._request("GET", "network", region, "/subnets"))["subnets"]
         usable = {n["id"] for n in nets if n.get("router:external") or n.get("shared")} or {n["id"] for n in nets}
-        try:  # free IPv4 per network from the public site API
-            info = (await public.regions()).get(region) or {}
-            free = {n["network_id"]: n.get("available_ips_v4") for n in info.get("networks") or []}
-        except Exception:
-            free = {}
+        free = await self._free_ips(region)
         pools: dict[str, IpPool] = {}
         for s in subnets:
             if s.get("ip_version") != 4 or s["network_id"] not in usable:
@@ -201,6 +203,14 @@ class HostVDSClient:
                 pools.setdefault(prefix, IpPool(prefix, s["network_id"], [s["cidr"]], s.get("id"),
                                                 free.get(s["network_id"])))
         return sorted(pools.values(), key=lambda p: tuple(int(x) for x in p.prefix.split(".")))
+
+    async def _free_ips(self, region: str) -> dict[str, int]:
+        """Free IPv4 per network from the HostVDS public site API."""
+        try:
+            info = (await public.regions()).get(region) or {}
+            return {n["network_id"]: n.get("available_ips_v4") for n in info.get("networks") or []}
+        except Exception:
+            return {}
 
     # ---------- ports: free & fast way to pick an IP before buying a server ----------
     supports_ports = True

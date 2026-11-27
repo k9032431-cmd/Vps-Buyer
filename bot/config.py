@@ -35,6 +35,7 @@ class Config:
     linode_api_url: str = os.getenv("LINODE_API_URL", "https://api.linode.com/v4")
     linode_geofeed_url: str = os.getenv("LINODE_GEOFEED_URL", "https://geoip.linode.com/")
     civo_api_url: str = os.getenv("CIVO_API_URL", "https://api.civo.com/v2")
+    ovh_auth_url: str = os.getenv("OVH_AUTH_URL", "https://auth.cloud.ovh.net")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     # 0 = no limit (stop with the ⛔ button).
     # (old MAX_ATTEMPTS from earlier installs is ignored on purpose — it defaulted to 50)

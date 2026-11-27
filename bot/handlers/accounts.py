@@ -16,6 +16,7 @@ router = Router()
 class AddAccount(StatesGroup):
     username = State()
     password = State()
+    project = State()
     token = State()
 
 
@@ -119,6 +120,14 @@ async def add_start(cb: CallbackQuery, state: FSMContext):
         await state.set_state(AddAccount.token)
         text = (f"➕ <b>Подключение {PROVIDER_NAMES[provider]}</b>\n\n" + TOKEN_HELP[provider]
                 + "\n\n🔒 Сообщение с ключом бот сразу удалит.")
+    elif provider == "ovh":
+        await state.set_state(AddAccount.username)
+        text = ("➕ <b>Подключение OVHcloud</b>\n\n"
+                "1️⃣ Панель OVH → <b>Public Cloud</b> → создайте проект (нужна привязанная оплата).\n"
+                "2️⃣ <b>Project Management → Users & Roles → Add user</b>, роль <b>Administrator</b> — "
+                "OVH покажет логин и пароль OpenStack.\n"
+                "3️⃣ ID проекта — под названием проекта (32 символа, он же <code>OS_TENANT_ID</code>).\n\n"
+                "👉 Отправьте <b>логин</b> пользователя (вида <code>user-XXXXXXXX</code>).")
     else:
         await state.set_state(AddAccount.username)
         text = ("➕ <b>Подключение HostVDS</b>\n\n"
@@ -140,7 +149,21 @@ async def add_username(message: Message, state: FSMContext):
 @router.message(AddAccount.password)
 async def add_password(message: Message, state: FSMContext):
     data = await state.get_data()
+    if data.get("provider") == "ovh":  # OVH also needs the project id
+        await state.update_data(password=message.text.strip())
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await state.set_state(AddAccount.project)
+        return await message.answer("3️⃣ Отправьте <b>ID проекта</b> Public Cloud (32 символа).", reply_markup=CANCEL)
     await _save(message, state, data["username"], message.text.strip(), data["username"])
+
+
+@router.message(AddAccount.project)
+async def add_project(message: Message, state: FSMContext):
+    data = await state.get_data()
+    await _save(message, state, data["username"], data["password"], message.text.strip())
 
 
 @router.message(AddAccount.token)

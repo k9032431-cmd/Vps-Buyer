@@ -223,7 +223,7 @@ async def _user_ip_step(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text("⏳ Готовлю покупку…")
     await cb.answer()
     targets, network_id = [], None
-    if data["provider"] == "hostvds":  # OpenStack: hunt IPs on the networks those subnets live in
+    if data["provider"] in ("hostvds", "ovh"):  # OpenStack: hunt IPs on the networks those subnets live in
         try:
             async with await _client_for(cb, state) as client:
                 pools = [asdict(p) for p in await client.ip_pools(data["region"])]
@@ -1099,7 +1099,7 @@ async def _run(bot: Bot, msg: Message, uid: int, acc: db.Account, job: PurchaseJ
                             + ("\n✅ Проверка пройдена" if job.check_url else "")
                             + ("\n\n⏱ Ключ начнёт работать примерно через минуту после запуска." if job.ssh_key
                                else "\n\n⏱ Пароль начнёт работать примерно через минуту после запуска."
-                               if acc.provider in ("hostvds", "digitalocean") else ""))
+                               if acc.provider in ("hostvds", "digitalocean", "ovh") else ""))
 
     job.on_found = found
     try:

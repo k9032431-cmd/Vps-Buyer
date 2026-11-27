@@ -134,7 +134,8 @@ def _reserve_targets(client, job: "PurchaseJob") -> list[tuple[str | None, str |
         return []
     if getattr(client, "reserves_ips", False):
         return [(None, None)]
-    return _port_targets(job)
+    # OVH: subnets may be unknown, ports still go on the public network the client picks
+    return _port_targets(job) or ([(None, None)] if getattr(client, "ports_anywhere", False) else [])
 
 
 def _port_targets(job: "PurchaseJob") -> list[tuple[str, str | None]]:
