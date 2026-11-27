@@ -194,6 +194,11 @@ def _busy(e: BaseException) -> bool:
         e.status == 429 or (e.status in (400, 403, 422) and any(w in str(e).lower() for w in LIMIT_WORDS)))
 
 
+def _subnet_full(r) -> bool:
+    """OpenStack: no free address left in the subnet a port was asked from."""
+    return isinstance(r, ProviderError) and ("IpAddressGenerationFailure" in str(r) or "No more IP addresses" in str(r))
+
+
 def _note_error(job: PurchaseJob, e: BaseException) -> None:
     line = f"⚠️ {_err(e)}"
     if line not in job.log[-4:] and not (_busy(e) and line in job.log):  # a limit error is said once
@@ -212,6 +217,8 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
     reserve = getattr(client, "reserves_ips", False)
     limited = job.max_port_attempts > 0
     fail_rounds = 0
+    turn = 0
+    full: set = set()  # (network, subnet) targets with no free addresses left
     try:
         while (len(good) < job.count - len(job.kept) and not job.cancelled
                and (not limited or job.ports_checked < job.max_port_attempts)):
@@ -221,19 +228,30 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 return None
             batch = parallel if not limited else min(parallel, job.max_port_attempts - job.ports_checked)
             first = job.ports_checked == 0
-            targets = _reserve_targets(client, job)
-            results = await asyncio.gather(
-                *(client.create_port(job.region, *targets[(job.ports_checked + i) % len(targets)])
-                  for i in range(batch)),
-                return_exceptions=True)
+            targets = [t for t in _reserve_targets(client, job) if t not in full]
+            if not targets:
+                job.switch_reason = "В выбранных подсетях закончились свободные IP — дальше подбираю через серверы"
+                return None
+            asked = [targets[(turn + i) % len(targets)] for i in range(batch)]
+            turn += batch
+            results = await asyncio.gather(*(client.create_port(job.region, *t) for t in asked),
+                                           return_exceptions=True)
+            for t, r in zip(asked, results):  # a subnet out of addresses is not asked again
+                if _subnet_full(r) and t not in full:
+                    full.add(t)
+                    job.log.append(f"ℹ️ В одной из подсетей закончились свободные IP — пропускаю её "
+                                   f"(осталось подсетей: {len(set(targets) - full)})")
+            results = [None if _subnet_full(r) else r for r in results]
+            skipped_full = sum(1 for r in results if r is None)
+            results = [r for r in results if r is not None]
             ok = sum(1 for r in results if not isinstance(r, BaseException))
             job.ports_checked += ok  # only IPs really seen
-            fail_rounds = 0 if ok else fail_rounds + 1
+            fail_rounds = 0 if ok or skipped_full else fail_rounds + 1
             if not first and fail_rounds >= FAILED_ROUNDS_STOP:
                 job.log.append(f"⚠️ {_err(results[0])}")
                 job.switch_reason = "IP без сервера перестали выдаваться — дальше подбираю через серверы"
                 return None
-            if first and all(isinstance(r, BaseException) for r in results):
+            if first and results and all(isinstance(r, BaseException) for r in results):
                 quota = any(w in str(results[0]).lower() for w in ("maximum", "limit", "quota"))
                 job.switch_reason = (QUOTA_TEXT if reserve and quota else
                                      "Резервные IP недоступны для аккаунта" if reserve

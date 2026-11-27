@@ -169,6 +169,42 @@ async def scenario():
         await srv.close()
 
 
+async def full_subnet_scenario():
+    """One chosen subnet has no free addresses (IpAddressGenerationFailure): it's skipped, not retried."""
+    from bot.providers import ProviderError
+
+    class Client(ovh.OVHClient):
+        asked: list = []
+
+        async def create_port(self, region, network_id, subnet_id):
+            self.asked.append(subnet_id)
+            if subnet_id == "full":
+                raise ProviderError('POST network/ports → 409: {"NeutronError": {"type": "IpAddressGenerationFailure", '
+                                    '"message": "No more IP addresses available on network ext."}}', 409)
+            return f"p-{len(self.asked)}", "54.38.224.137" if len(self.asked) > 6 else "51.68.221.5"
+
+        async def delete_port(self, region, port_id):
+            pass
+
+        async def create_server(self, *a, **k):
+            from bot.providers import Server
+            return Server("s1", "x", "BUILD", [], "pw")
+
+        async def wait_active(self, region, sid, timeout):
+            from bot.providers import Server
+            return Server("s1", "x", "ACTIVE", ["54.38.224.137"], "pw")
+
+    c = Client("http://127.0.0.1:9", "u", "p", PROJECT)
+    job = PurchaseJob("RBX-A", None, "img", "ext", ["54.38.224", "145.239.173"], 1, max_attempts=0, parallel=1,
+                      active_timeout=10, boot_volume_gb=10, port_parallel=2,
+                      targets=[("ext", "ok"), ("ext", "full")])
+    await asyncio.wait_for(run_purchase(c, job, lambda j: ORIG_SLEEP(0)), 10)
+    assert [k.ipv4[0] for k in job.kept] == ["54.38.224.137"], job.log
+    assert c.asked.count("full") == 1, c.asked
+    assert sum("закончились свободные IP" in line for line in job.log) == 1
+    assert not any("No more IP" in line for line in job.log), "not shown as an error"
+
+
 async def sg_quota_scenario():
     """The project can't have one more security group (OVH quota) → the default group is used."""
     app, st = fake_ovh(["57.129.7.7"], sg_quota=True)
@@ -193,6 +229,7 @@ def test_ovh():
     try:
         asyncio.run(scenario())
         asyncio.run(sg_quota_scenario())
+        asyncio.run(full_subnet_scenario())
     finally:
         buyer.asyncio.sleep = orig
 
