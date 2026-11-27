@@ -33,6 +33,7 @@ BUSY_WAIT = 15  # seconds between tries while the provider is busy or the accoun
 # the same wrong IP forever. Once an IP repeats, wrong servers are kept (up to this many, oldest released
 # first) until the purchase ends, so the cloud has to give out other addresses.
 HOLD_SERVERS = int(os.getenv("HOLD_SERVERS", "100"))
+FAILED_ROUNDS_STOP = 5  # rounds in a row where every server creation failed (not a limit) → stop
 REPEAT_STOP = 15  # servers in a row with an already seen IP (at the account limit) before the bot gives up
 BUSY_ROUNDS_LIMIT = 20  # server rounds in a row refused by an account limit before the purchase stops
 SERVER_BUSY_RETRIES = 12  # tries to build a server on a found IP while the account is at its limit
@@ -210,6 +211,7 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
     parallel = min(job.port_parallel, getattr(client, "reserve_parallel", job.port_parallel))
     reserve = getattr(client, "reserves_ips", False)
     limited = job.max_port_attempts > 0
+    fail_rounds = 0
     try:
         while (len(good) < job.count - len(job.kept) and not job.cancelled
                and (not limited or job.ports_checked < job.max_port_attempts)):
@@ -224,7 +226,13 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                 *(client.create_port(job.region, *targets[(job.ports_checked + i) % len(targets)])
                   for i in range(batch)),
                 return_exceptions=True)
-            job.ports_checked += batch
+            ok = sum(1 for r in results if not isinstance(r, BaseException))
+            job.ports_checked += ok  # only IPs really seen
+            fail_rounds = 0 if ok else fail_rounds + 1
+            if not first and fail_rounds >= FAILED_ROUNDS_STOP:
+                job.log.append(f"⚠️ {_err(results[0])}")
+                job.switch_reason = "IP без сервера перестали выдаваться — дальше подбираю через серверы"
+                return None
             if first and all(isinstance(r, BaseException) for r in results):
                 quota = any(w in str(results[0]).lower() for w in ("maximum", "limit", "quota"))
                 job.switch_reason = (QUOTA_TEXT if reserve and quota else
@@ -333,9 +341,13 @@ async def _check(client, job: PurchaseJob, state: Server, ip: str) -> tuple[bool
 
 async def _try_server(client, job: PurchaseJob) -> None:
     name = f"vps-{secrets.token_hex(3)}"
-    srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id, job.boot_volume_gb,
-                                     metadata=job.metadata, ssh_key=job.ssh_key,
-                                     extra_keys=[job.bot_key[1]] if job.bot_key else None)
+    try:
+        srv = await client.create_server(job.region, name, job.flavor, job.image_id, job.network_id,
+                                         job.boot_volume_gb, metadata=job.metadata, ssh_key=job.ssh_key,
+                                         extra_keys=[job.bot_key[1]] if job.bot_key else None)
+    except BaseException:
+        job.attempts -= 1  # nothing was created: "Создано" counts real servers only
+        raise
     reason = "не тот IP"
     try:
         state = await client.wait_ip(job.region, srv.id, job.active_timeout)
@@ -434,6 +446,7 @@ async def run_purchase(client, job: PurchaseJob,
 async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
     unlimited = job.max_attempts <= 0
     busy_rounds = 0
+    failed_rounds = 0
     while (len(job.kept) < job.count and (unlimited or job.attempts < job.max_attempts)
            and not job.cancelled):
         need = job.count - len(job.kept)
@@ -469,6 +482,7 @@ async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
                 _note_error(job, r)
                 busy = busy or _busy(r)
         if (job.prefixes and not job.kept and not job.hinted and job.attempts >= NO_MATCH_HINT
+                and len(job.seen) >= NO_MATCH_HINT  # only when IPs were really seen
                 and not any(ip_matches(ip, job.prefixes) for ip in job.seen)):
             job.hinted = True
             job.log.append(f"💡 За {job.attempts} попыток ни одного подходящего IP — похоже, этот дата-центр "
@@ -481,6 +495,12 @@ async def _server_rounds(client, job: PurchaseJob, on_progress) -> None:
             break
         if busy:
             job.at_limit = True
+        failed = [r for r in results if isinstance(r, BaseException)]
+        failed_rounds = failed_rounds + 1 if failed and len(failed) == len(results) and not busy else 0
+        if failed_rounds >= FAILED_ROUNDS_STOP:
+            job.error = f"Провайдер не даёт создать сервер: {failed[-1]}"
+            job.log.append(f"❗ {_err(failed[-1])}")
+            break
         if job.at_limit and job.repeats >= REPEAT_STOP and not job.kept:
             job.error = ("Провайдер раз за разом выдаёт одни и те же IP, а лимит серверов аккаунта не даёт держать "
                          "больше, чтобы получить другие. Попросите поддержку провайдера поднять лимит серверов "

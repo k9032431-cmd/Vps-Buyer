@@ -14,7 +14,7 @@ ORIG_SLEEP = asyncio.sleep
 PROJECT = "0123456789abcdef0123456789abcdef"
 
 
-def fake_ovh(port_ips, allow_ports=True):
+def fake_ovh(port_ips, allow_ports=True, sg_quota=False):
     port_ips = itertools.cycle(port_ips)
     st = {"ports": {}, "deleted_ports": [], "servers": {}, "deleted": [], "scope": None, "sg": []}
     a = web.Application()
@@ -42,8 +42,13 @@ def fake_ovh(port_ips, allow_ports=True):
 
     async def sgs(req):
         if req.method == "POST":
+            if sg_quota:
+                return web.json_response({"NeutronError": {"type": "OverQuota", "message":
+                                          "Quota exceeded for resources: ['security_group']."}}, status=409)
             st["sg"].append("sg1")
             return web.json_response({"security_group": {"id": "sg1"}}, status=201)
+        if req.query.get("name") == "default":
+            return web.json_response({"security_groups": [{"id": "sg-default"}]})
         return web.json_response({"security_groups": [{"id": s} for s in st["sg"]]})
     a.router.add_route("*", "/{r}/network/v2.0/security-groups", sgs)
     a.router.add_post("/{r}/network/v2.0/security-group-rules", lambda r: web.json_response({}, status=201))
@@ -54,6 +59,7 @@ def fake_ovh(port_ips, allow_ports=True):
                 return web.json_response({"NeutronError": {"message": "not allowed on Ext-Net"}}, status=403)
             b = (await req.json())["port"]
             assert b["network_id"] == "ext"
+            st.setdefault("port_sgs", []).append(b["security_groups"])
             pid = f"p{len(st['ports'])}"
             st["ports"][pid] = next(port_ips)
             return web.json_response({"port": {"id": pid, "fixed_ips": [{"ip_address": st["ports"][pid]},
@@ -163,11 +169,30 @@ async def scenario():
         await srv.close()
 
 
+async def sg_quota_scenario():
+    """The project can't have one more security group (OVH quota) → the default group is used."""
+    app, st = fake_ovh(["57.129.7.7"], sg_quota=True)
+    srv = TestServer(app)
+    await srv.start_server()
+    url = str(srv.make_url("")).rstrip("/")
+    try:
+        async with ovh.OVHClient(url, "user-x", "pw", PROJECT) as c:
+            fl = (await c.list_flavors("UK1"))[0]
+            job = PurchaseJob("UK1", fl, "img", None, ["57.129.7"], 1, max_attempts=0, parallel=1,
+                              active_timeout=10, boot_volume_gb=10, port_parallel=3)
+            await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
+        assert not job.error and job.mode == "ports" and [k.ipv4[0] for k in job.kept] == ["57.129.7.7"], job.log
+        assert st["port_sgs"][0] == ["sg-default"]
+    finally:
+        await srv.close()
+
+
 def test_ovh():
     orig = buyer.asyncio.sleep
     buyer.asyncio.sleep = lambda s: ORIG_SLEEP(0)
     try:
         asyncio.run(scenario())
+        asyncio.run(sg_quota_scenario())
     finally:
         buyer.asyncio.sleep = orig
 

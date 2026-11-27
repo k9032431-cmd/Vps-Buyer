@@ -306,6 +306,20 @@ async def reused_ip_limited():
     assert not c.alive, "nothing left running"
 
 
+async def always_failing():
+    """Every creation fails the same way (not a limit): no endless loop, nothing counted as created."""
+    c = FakeReserve([], ["1.1.1.1"])
+    c.supports_ports = False
+
+    async def boom(*a, **k):
+        raise ProviderError("Quota exceeded for resources: ['security_group']", 409)
+    c.create_server = boom
+    j = job(["45.32.0.0/21"])
+    await asyncio.wait_for(run_purchase(c, j, nothing), 10)
+    assert j.error and "security_group" in j.error and j.attempts == 0, (j.error, j.attempts)
+    assert not any("попыток ни одного" in line for line in j.log), "no 'no matching IP' hint without IPs"
+
+
 async def scenario():
     assert {"vultr", "hetzner", "civo"} <= RESERVE_PROVIDERS and "civo" in SCOUT_PROVIDERS
     orig_wait = buyer.BUSY_WAIT
@@ -323,6 +337,7 @@ async def scenario():
         await civo_reserved()
         await vultr_locked()
         await reused_ip()
+        await always_failing()
         await reused_ip_limited()
     finally:
         buyer.BUSY_WAIT = orig_wait

@@ -5,10 +5,12 @@ prices), regions named GRA11, SBG5, DE1, WAW1…, the public network is "Ext-Net
 Fast mode: a Neutron port on Ext-Net shows its public IP at once and a server is built on it; if OVH
 refuses ports there, the bot falls back to buying servers (both are hourly)."""
 import asyncio
+import logging
 
 from .base import Flavor, IpPool, ProviderError, RegionStatus, Server
 from .hostvds import HostVDSClient
 
+log = logging.getLogger(__name__)
 AUTH_URL = "https://auth.cloud.ovh.net"
 PUBLIC_NET = "Ext-Net"
 # region prefix → (country, city)
@@ -42,6 +44,20 @@ class OVHClient(HostVDSClient):
 
     async def _free_ips(self, region: str) -> dict[str, int]:
         return {}
+
+    async def security_group(self, region: str) -> str:
+        """Our allow_all group; if the project can't have one more group (OVH's quota is small), the
+        project's "default" group — on OVH it lets all traffic through, and ufw is switched off anyway."""
+        try:
+            return await super().security_group(region)
+        except ProviderError as e:
+            groups = (await self._request("GET", "network", region, "/security-groups",
+                                          params={"name": "default"}))["security_groups"]
+            if not groups:
+                raise
+            log.info("OVH %s: using the default security group (%s)", region, e)
+            self._sg[region] = groups[0]["id"]
+            return self._sg[region]
 
     async def region_statuses(self) -> list[RegionStatus]:
         await self._ensure_token()
