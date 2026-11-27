@@ -35,7 +35,10 @@ def fake_ovh(port_ips, allow_ports=True):
             nets = []
         return web.json_response({"networks": nets})
     a.router.add_get("/{r}/network/v2.0/networks", networks)
-    a.router.add_get("/{r}/network/v2.0/subnets", lambda r: web.json_response({"subnets": []}))  # hidden by OVH
+    # OVH shows a placeholder instead of its real ranges
+    a.router.add_get("/{r}/network/v2.0/subnets", lambda r: web.json_response({"subnets": [
+        {"id": "sub-x", "network_id": "ext", "ip_version": 4, "cidr": "0.0.0.0/0",
+         "allocation_pools": [{"start": "0.0.0.2", "end": "0.0.255.254"}]}]}))
 
     async def sgs(req):
         if req.method == "POST":
@@ -111,7 +114,7 @@ async def scenario():
             flavors = await c.list_flavors("GRA11")
             assert [f.name for f in flavors] == ["d2-2", "b2-7"], "windows and GPU flavors hidden"
             assert flavors[0].price == "≈€6/мес"
-            assert await c.ip_pools("GRA11") == []
+            assert await c.ip_pools("GRA11") == [], "no fake 0.0.x.# blocks"
 
             # subnets hidden: ports still go on Ext-Net → only the matching IP gets a server
             job = PurchaseJob("GRA11", flavors[0], "img", None, ["57.129.7"], 1, max_attempts=0, parallel=1,

@@ -197,7 +197,9 @@ class HostVDSClient:
         for s in subnets:
             if s.get("ip_version") != 4 or s["network_id"] not in usable:
                 continue
-            if ipaddress.ip_network(s["cidr"], strict=False).is_private:
+            net = ipaddress.ip_network(s["cidr"], strict=False)
+            # OVH's Ext-Net shows a placeholder subnet (0.0.0.0/…) instead of its real ranges: not a pool
+            if net.is_private or not net.is_global or net.prefixlen < 16:
                 continue
             for prefix in blocks24(s["cidr"], s.get("allocation_pools")):
                 pools.setdefault(prefix, IpPool(prefix, s["network_id"], [s["cidr"]], s.get("id"),
