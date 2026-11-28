@@ -1155,7 +1155,7 @@ async def cancel(cb: CallbackQuery):
 # ---------- IP scouting (Selectel VDS: no subnet API) ----------
 SCAN_SIZES = (5, 10, 20)
 SCAN_CURRENCY = {"selectel": "₽", "timeweb": "₽", "aeza": "€", "serverspace": "₽", "ovh": "€", "gcp": "$",
-                 "digitalocean": "$", "linode": "$", "civo": "$", "hetzner": "€", "vultr": "$", "upcloud": "$"}
+                 "digitalocean": "$", "linode": "$", "civo": "$", "hetzner": "€", "vultr": "$", "upcloud": "€"}
 
 
 @router.callback_query(F.data == "buy:scan")

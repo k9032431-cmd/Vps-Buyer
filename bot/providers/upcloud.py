@@ -88,15 +88,15 @@ class UpCloudClient:
     # ---------- account ----------
     async def check(self) -> str:
         acc = (await self._request("GET", "/account"))["account"]
-        credits = float(acc.get("credits") or 0) / 100  # cents
-        return f"{acc.get('username', 'UpCloud')}, баланс ${credits:.2f}"
+        credits = float(acc.get("credits") or 0) / 100  # cents, in the account's currency
+        return f"{acc.get('username', 'UpCloud')}, баланс {credits:.2f}"
 
     # ---------- zones ----------
     async def region_statuses(self) -> list[RegionStatus]:
         zones = (await self._request("GET", "/zone"))["zones"]["zone"]
         result = []
         for z in sorted(zones, key=lambda z: z["id"]):
-            if z.get("public", "yes") != "yes":
+            if z.get("public", "yes") not in ("yes", True):
                 continue
             country, city = ZONES.get(z["id"], ("", z.get("description") or z["id"]))
             result.append(RegionStatus(z["id"], True, "", None, [], country, city))
@@ -126,9 +126,11 @@ class UpCloudClient:
             hour = prices.get(name)
             if prices and hour is None:  # not sold in this zone
                 continue
+            # prices come in the account's currency; a month is capped at 672 hours
             flavors.append(Flavor(name, name, int(p.get("core_number") or 0), int(p.get("memory_amount") or 0),
                                   int(p.get("storage_size") or 0),
-                                  f"${hour * 730:.0f}/мес · ${hour:.4f}/час" if hour else ""))
+                                  f"≈{hour * 672:.0f}/мес · {hour:.4f}/час" if hour else "",
+                                  kind=p.get("storage_tier") or "maxiops"))
         flavors.sort(key=lambda f: (prices.get(f.id, 99), f.vcpus, f.ram_mb))
         return flavors[:20]
 
@@ -164,6 +166,9 @@ class UpCloudClient:
                             extra_keys: list[str] | None = None) -> Server:
         password = None if ssh_key else make_password()
         keys = ([ssh_key] if ssh_key else []) + list(extra_keys or [])
+        if not keys:  # cloud-init templates (new Ubuntu/Debian) refuse a server without an SSH key
+            from .. import sshkey
+            keys = [sshkey.bot_key()[1]]
         script = merge_scripts(password_script(password) if password else open_access_script(False),
                                ssh_key_script(keys) if keys else None)
         body = {"server": {
@@ -173,7 +178,7 @@ class UpCloudClient:
                            **({"ssh_keys": {"ssh_key": keys}} if keys else {})},
             "storage_devices": {"storage_device": [{
                 "action": "clone", "storage": image_id, "title": f"{name}-disk",
-                "size": max(flavor.disk_gb or 10, 10), "tier": "maxiops"}]},
+                "size": max(flavor.disk_gb or 10, 10), "tier": flavor.kind or "maxiops"}]},
             "networking": {"interfaces": {"interface": [
                 {"type": "public", "ip_addresses": {"ip_address": [{"family": "IPv4"}]}},
                 {"type": "utility", "ip_addresses": {"ip_address": [{"family": "IPv4"}]}}]}},
@@ -187,16 +192,14 @@ class UpCloudClient:
 
     async def list_servers(self) -> list[Server]:
         data = await self._request("GET", "/server")
-        result = []
-        for s in (data or {}).get("servers", {}).get("server", []):
-            srv = self._server(s)
-            if not srv.ipv4 and s.get("state") == "started":
-                try:
-                    srv = await self.get_server(s.get("zone", ""), s["uuid"])
-                except ProviderError:
-                    pass
-            result.append(srv)
-        return result
+        listed = (data or {}).get("servers", {}).get("server", [])
+
+        async def one(s):  # the list has no IPs: details per server
+            try:
+                return await self.get_server(s.get("zone", ""), s["uuid"])
+            except ProviderError:
+                return self._server(s)
+        return list(await asyncio.gather(*(one(s) for s in listed)))
 
     async def delete_server(self, region: str, server_id: str) -> None:
         """Stop (hard) and delete with its disk. UpCloud deletes only stopped servers and a fresh server is
