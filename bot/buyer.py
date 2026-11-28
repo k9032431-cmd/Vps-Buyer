@@ -442,8 +442,36 @@ async def _release_held(client, job: PurchaseJob) -> None:
         job.log.append(f"🗑 Удалены удержанные серверы: {sum(results)} из {len(held)}")
 
 
+def _all_chosen_bad(job: PurchaseJob) -> bool:
+    """Every /24 block of the chosen subnets already failed the check (and none passed): nothing to find."""
+    if not job.check_url or not job.prefixes:
+        return False
+    blocks = []
+    for prefix in job.prefixes:
+        if "/" in prefix:
+            net = ipaddress.ip_network(prefix, strict=False)
+            if net.prefixlen < 20:
+                return False  # too wide to judge
+            blocks += [str(net.network_address + i * 256).rsplit(".", 1)[0]
+                       for i in range(max(1, net.num_addresses // 256))]
+        else:
+            parts = prefix.rstrip(".#").split(".")
+            if len(parts) < 3:
+                return False
+            blocks.append(".".join(parts[:3]))
+    return all(block_is_bad(job, b + ".1") for b in blocks)
+
+
 async def run_purchase(client, job: PurchaseJob,
                        on_progress: Callable[[PurchaseJob], Awaitable[None]]) -> PurchaseJob:
+    if _all_chosen_bad(job):
+        job.error = ("В этой локации сейчас нет рабочих IP — выберите другую локацию или напишите админу."
+                     if job.hide_prefixes else
+                     "Все выбранные подсети уже не проходят проверку — здесь рабочих IP не найти. "
+                     "Выберите другие блоки (🟢 — рабочие) или другую локацию.")
+        job.log.append(f"❗ {html.escape(job.error)}")
+        await on_progress(job)
+        return job
     if _reserve_targets(client, job) and job.prefixes:
         job.mode = "ports"
         # rounds: hunt IPs on free ports → buy servers on them → (check) — until enough servers are kept
