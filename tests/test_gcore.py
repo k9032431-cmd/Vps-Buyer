@@ -60,7 +60,10 @@ def fake_gcore(ips, ip_quota=None):
     a.router.add_get(P + "/v1/images/{p}/{r}", lambda r: web.json_response({"results": [
         {"id": "img-u22", "name": "ubuntu-22.04-x64", "os_type": "linux", "status": "active"},
         {"id": "img-win", "name": "windows-2022", "os_type": "windows", "status": "active"}]}))
-    a.router.add_get(P + "/v1/subnets/{p}/{r}", lambda r: web.json_response({"results": [
+    a.router.add_get(P + "/v1/subnets/{p}/{r}/{sid}", lambda r: web.json_response(
+        {"id": r.match_info["sid"], "cidr": {"sub-92.38": "92.38.140.0/22", "sub-5.188": "5.188.120.0/24"}.get(
+            r.match_info["sid"], "1.0.0.0/24")}))
+    a.router.add_get(P + "/v1/subnets/{p}/{r}", lambda r: web.json_response({"results": [] if st.get("no_subnets") else [
         {"network_id": "ext-128", "cidr": "92.38.140.0/24"}, {"network_id": "ext-128", "cidr": "0.0.0.0/0"},
         {"network_id": "private", "cidr": "10.0.0.0/24"}]}))
 
@@ -71,7 +74,9 @@ def fake_gcore(ips, ip_quota=None):
             if ip_quota is not None and len(st["rips"]) >= ip_quota:
                 return task(error="Quota exceeded: external_ip_count limit 2")
             pid = f"port-{len(st['rips'])}"
-            st["rips"][pid] = {"port_id": pid, "fixed_ip_address": next(ips), "is_external": True, "reservation": None}
+            ip = next(ips)
+            st["rips"][pid] = {"port_id": pid, "fixed_ip_address": ip, "is_external": True, "reservation": None,
+                               "subnet_id": "sub-" + ".".join(ip.split(".")[:2])}
             return task({"ports": [pid]})
         return web.json_response({"results": [v for k, v in st["rips"].items() if k not in st["deleted_rips"]]})
     a.router.add_route("*", P + "/v1/reserved_fixed_ips/{p}/{r}", rips)
@@ -197,11 +202,53 @@ async def scenario():
         await srv.close()
 
 
+async def auto_scout_scenario():
+    """A location with no known subnets: opening the IP step takes a few IPs (no servers), learns their whole
+    subnets and shows the blocks right away."""
+    import tempfile
+    from aiogram import Bot, Dispatcher
+    from bot import db
+    from bot.config import config
+    from bot.handlers import accounts, buy, menu, servers, update
+    from tests.test_ip_select import buttons
+    from tests.test_servers_update import UID, FakeSession, cb_update
+    object.__setattr__(config, "db_path", tempfile.mkdtemp() + "/t.db")
+    object.__setattr__(config, "admin_ids", {UID})
+    await db.init_db()
+    app, st = fake_gcore(["92.38.141.5", "92.38.143.9", "5.188.120.7"])
+    st["no_subnets"] = True
+    srv = TestServer(app)
+    await srv.start_server()
+    object.__setattr__(config, "gcore_api_url", str(srv.make_url(P)))
+    try:
+        acc = await db.add_account(UID, "gcore", "p", "7711_tok", "")
+        s = FakeSession()
+        bot = Bot("1:x", session=s)
+        dp = Dispatcher()
+        for r in (menu.router, accounts.router, servers.router, buy.router, update.router):
+            r._parent_router = None
+        dp.include_routers(menu.router, accounts.router, servers.router, buy.router, update.router)
+        ctx = dp.fsm.get_context(bot, UID, UID)
+        await ctx.set_data({"provider": "gcore", "account_id": acc, "regions": ["128"], "is_admin": True,
+                            "region_labels": {"128": "🇦🇿 Baku · Core"}})
+        await dp.feed_update(bot, cb_update(1, "buy:reg:0"))
+        assert any("подсети ещё неизвестны" in t for t in s.texts())
+        text = s.texts()[-1]
+        assert "92.38.140.#" in text and "92.38.143.#" in text and "5.188.120.#" in text, text
+        assert "выпадал" in text and not st["created"], "IPs only, no servers"
+        assert set(st["deleted_rips"]) == set(st["rips"]), "every IP released"
+        assert "92.38.140.0/22" in await db.subnets("gcore", "128")
+        assert len(await db.seen_ips("gcore", "128")) >= 3
+    finally:
+        await srv.close()
+
+
 def test_gcore():
     orig = buyer.asyncio.sleep
     buyer.asyncio.sleep = lambda s: ORIG_SLEEP(0)
     try:
         asyncio.run(scenario())
+        asyncio.run(auto_scout_scenario())
     finally:
         buyer.asyncio.sleep = orig
 

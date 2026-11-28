@@ -192,6 +192,8 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
     else:
         pools = _merge_seen(pools, await db.seen_ips(data["provider"], region),
                             await db.subnets(data["provider"], region))
+        if not pools and data["provider"] in RESERVE_PROVIDERS and config.auto_scout > 0:
+            pools = await _auto_scout(cb, state, data, region, label)
     full = [p for p in pools if p.free == 0]          # provider says: no free addresses there
     pools = [p for p in pools if p.free != 0]
     stats = await db.check_stats(data["provider"], region)
@@ -204,6 +206,25 @@ async def choose_ip(cb: CallbackQuery, state: FSMContext):
                             custom=[p for p in preset if p not in index], preset=preset,
                             full_blocks=len(full), ip_group=None)
     await render_ip_screen(cb.message, state, edit=True)
+
+
+async def _auto_scout(cb: CallbackQuery, state: FSMContext, data: dict, region: str, label: str) -> list[IpPool]:
+    """No subnets known for this location yet: take a few IPs without servers (almost free on IP-only
+    providers), note them and their subnets, release them — the picker then shows real blocks."""
+    n = config.auto_scout
+    await cb.message.edit_text(f"🔍 <b>{hd.quote(label)}</b>: подсети ещё неизвестны — проверяю, какие IP "
+                               f"выдаёт эта локация ({n} IP без серверов, почти бесплатно)…")
+    job = ScanJob(region=region, flavor=Flavor("-", "-", 0, 0, 0), image_id="-", samples=n, parallel=3)
+    try:
+        async with await _client_for(cb, state) as client:
+            await asyncio.wait_for(run_scan(client, job, lambda j: asyncio.sleep(0)), 180)
+    except Exception as e:
+        log.warning("auto scout failed: %s", e)
+    if job.ips:
+        await db.add_seen_ips(data["provider"], region, job.ips)
+    if job.subnets:
+        await db.add_subnets(data["provider"], region, job.subnets)
+    return _merge_seen([], await db.seen_ips(data["provider"], region), await db.subnets(data["provider"], region))
 
 
 async def _user_ip_step(cb: CallbackQuery, state: FSMContext):

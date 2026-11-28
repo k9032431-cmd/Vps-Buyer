@@ -46,6 +46,8 @@ class GcoreClient:
         self._regions: dict[str, dict] = {}
         self._sg: dict[str, str | None] = {}
         self._region_of: dict[str, str] = {}
+        self._subnet_cidr: dict[str, str | None] = {}
+        self.cidr_of: dict[str, str] = {}      # reserved IP → its public subnet (when Gcore tells)
 
     async def __aenter__(self):
         self._session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
@@ -202,7 +204,17 @@ class GcoreClient:
         port_id = (res.get("ports") or [None])[0]
         if not port_id:
             raise ProviderError("Gcore: IP не выдан")
-        ip = (await self._request("GET", f"/v1/reserved_fixed_ips/{p}/{region}/{port_id}")).get("fixed_ip_address")
+        rip = await self._request("GET", f"/v1/reserved_fixed_ips/{p}/{region}/{port_id}")
+        ip = rip.get("fixed_ip_address")
+        if ip and rip.get("subnet_id") and rip["subnet_id"] not in self._subnet_cidr:
+            try:  # the whole public subnet this IP came from (blocks for the picker)
+                sub = await self._request("GET", f"/v1/subnets/{p}/{region}/{rip['subnet_id']}")
+                self._subnet_cidr[rip["subnet_id"]] = sub.get("cidr")
+            except ProviderError:
+                self._subnet_cidr[rip["subnet_id"]] = None
+        cidr = self._subnet_cidr.get(rip.get("subnet_id"))
+        if ip and cidr:
+            self.cidr_of[ip] = cidr
         return port_id, ip
 
     async def delete_port(self, region: str, port_id: str) -> None:

@@ -75,6 +75,9 @@ async def _probe(client, job: ScanJob) -> None:
             if ip:
                 job.ips.append(ip)
                 job.log.append(f"🔎 <code>{html.escape(ip)}</code>")
+                cidr = getattr(client, "cidr_of", {}).get(ip)  # Gcore: the IP's whole subnet
+                if cidr and cidr not in job.subnets:
+                    job.subnets.append(cidr)
         finally:
             await client.delete_port(job.region, port_id)
             job.deleted += 1
