@@ -3,6 +3,7 @@ from .aeza import AezaClient
 from .base import Flavor, Image, IpPool, ProviderError, RegionStatus, Server
 from .civo import CivoClient
 from .digitalocean import DigitalOceanClient
+from .gcore import GcoreClient
 from .gcp import GCPClient
 from .hetzner import HetznerClient
 from .hostvds import HostVDSClient
@@ -17,22 +18,23 @@ from .vultr import VultrClient
 # Shown in the bot (buy / accounts menus), in this order.
 PROVIDERS = {"hostvds": "HostVDS", "digitalocean": "DigitalOcean", "hetzner": "Hetzner", "vultr": "Vultr",
              "linode": "Linode", "civo": "Civo", "gcp": "Google Cloud", "ovh": "OVHcloud",
-             "upcloud": "UpCloud"}
+             "upcloud": "UpCloud", "gcore": "Gcore"}
 # Every provider the bot can still talk to — hidden ones stay so servers bought there can be deleted.
 PROVIDER_NAMES = {**PROVIDERS, "selectel": "Selectel VDS", "timeweb": "Timeweb Cloud", "aeza": "Aeza",
                   "serverspace": "Serverspace"}
 # Providers without a subnet list: blocks are learned from servers and IP scouting.
-SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr", "civo", "gcp", "ovh", "upcloud"}
+SCOUT_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "hetzner", "vultr", "civo", "gcp", "ovh", "upcloud",
+                   "gcore"}
 # Providers that reserve a standalone IP and build a server on it (fast, almost free IP hunting / scouting).
-RESERVE_PROVIDERS = {"hetzner", "vultr", "civo", "gcp"}
+RESERVE_PROVIDERS = {"hetzner", "vultr", "civo", "gcp", "gcore"}
 # Providers connected with a single API token (stored in Account.password).
 TOKEN_PROVIDERS = {"selectel", "timeweb", "aeza", "serverspace", "digitalocean", "hetzner", "vultr", "linode", "civo",
-                   "gcp", "upcloud"}
+                   "gcp", "upcloud", "gcore"}
 # Providers whose full subnet list is known up front from a geofeed (prefixes are CIDRs, chosen by mask).
 SUBNET_PROVIDERS = {"digitalocean", "hetzner", "vultr", "linode"}
 # Providers that can put your SSH public key on a new server (Aeza's order API has no way to pass one).
 SSH_KEY_PROVIDERS = {"hostvds", "selectel", "timeweb", "serverspace", "digitalocean", "hetzner", "vultr",
-                     "linode", "civo", "gcp", "ovh", "upcloud"}
+                     "linode", "civo", "gcp", "ovh", "upcloud", "gcore"}
 
 _CLIENTS = {
     "selectel": lambda t: SelectelVDSClient(t, config.selectel_api_url),
@@ -46,6 +48,7 @@ _CLIENTS = {
     "civo": lambda t: CivoClient(t, config.civo_api_url),
     "gcp": lambda t: GCPClient(t),
     "upcloud": lambda t: UpCloudClient(t, config.upcloud_api_url),
+    "gcore": lambda t: GcoreClient(t, config.gcore_api_url),
 }
 
 

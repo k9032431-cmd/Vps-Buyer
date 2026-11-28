@@ -353,7 +353,7 @@ async def scenario():
     for m in (hetzner, vultr, linode, civo):
         m.asyncio.sleep = lambda s: ORIG_SLEEP(0)
     _CACHE.clear()
-    assert list(PROVIDERS) == ["hostvds", "digitalocean", "hetzner", "vultr", "linode", "civo", "gcp", "ovh", "upcloud"]
+    assert list(PROVIDERS) == ["hostvds", "digitalocean", "hetzner", "vultr", "linode", "civo", "gcp", "ovh", "upcloud", "gcore"]
     assert {"selectel", "timeweb", "aeza", "serverspace"} <= set(PROVIDER_NAMES), "hidden, still usable for deletes"
     assert type(make_client("selectel", "", "t", "")).__name__ == "SelectelVDSClient"
     try:

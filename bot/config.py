@@ -37,6 +37,7 @@ class Config:
     civo_api_url: str = os.getenv("CIVO_API_URL", "https://api.civo.com/v2")
     ovh_auth_url: str = os.getenv("OVH_AUTH_URL", "https://auth.cloud.ovh.net")
     upcloud_api_url: str = os.getenv("UPCLOUD_API_URL", "https://api.upcloud.com/1.3")
+    gcore_api_url: str = os.getenv("GCORE_API_URL", "https://api.gcore.com/cloud")
     # Safety limit: max servers created in a single purchase job (incl. deleted ones).
     # 0 = no limit (stop with the ⛔ button).
     # (old MAX_ATTEMPTS from earlier installs is ignored on purpose — it defaulted to 50)
