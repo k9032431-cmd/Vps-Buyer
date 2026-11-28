@@ -84,6 +84,8 @@ class PurchaseJob:
     held: list[tuple[str, str]] = field(default_factory=list)  # wrong servers kept so their IP isn't reissued
     hold_mode: bool = False      # the provider repeated an IP: keep wrong servers for a while
     repeats: int = 0             # servers in a row that got an IP seen before
+    failed_ips: set = field(default_factory=set)  # IPs that failed the check in this purchase: never again
+    no_login: set = field(default_factory=set)    # IPs whose server could not be logged into
     at_limit: bool = False       # the account's server limit was hit
     log: list[str] = field(default_factory=list)   # HTML-safe lines
     seen: list[str] = field(default_factory=list)  # every IP the provider gave us
@@ -275,9 +277,9 @@ async def _hunt_ports(client, job: PurchaseJob, progress) -> list[tuple[str, str
                     job.seen.append(ip)
                 if ip and ip_matches(ip, job.prefixes):
                     job.port_matches += 1
-                    if block_is_bad(job, ip):
+                    if block_is_bad(job, ip) or ip in job.failed_ips:
                         job.skipped_bad += 1
-                if (ip and ip_matches(ip, job.prefixes) and not block_is_bad(job, ip)
+                if (ip and ip_matches(ip, job.prefixes) and not block_is_bad(job, ip) and ip not in job.failed_ips
                         and len(good) < job.count - len(job.kept)):
                     good.append((port_id, ip))
                     job.log.append(f"🎯 {_code(ip)} — нашёлся, покупаю сервер")
@@ -327,7 +329,7 @@ async def _server_on_port(client, job: PurchaseJob, port_id: str, ip: str) -> No
         if job.check_url:
             job.log.append(f"🔎 {_code(ip)} — проверяю…")
             works, _why = await _check(client, job, state, ip)
-            reason = "не прошёл проверку"
+            reason = _fail_reason(job, ip)
         if works and not job.cancelled:
             job.log.append(f"✅ {_code(ip)} — " + ("проверка пройдена, сервер рабочий" if job.check_url
                                                   else "сервер готов"))
@@ -354,7 +356,15 @@ async def _check(client, job: PurchaseJob, state: Server, ip: str) -> tuple[bool
         logging.getLogger(__name__).info("check failed for %s: %s", ip, why)
     if ok is not None:  # an SSH problem says nothing about the IP itself
         _remember_check(job, ip, bool(ok))
+    if ok is None:
+        job.no_login.add(ip)
+    elif not ok:
+        job.failed_ips.add(ip)
     return bool(ok), why
+
+
+def _fail_reason(job: "PurchaseJob", ip: str) -> str:
+    return "не удалось зайти на сервер" if ip in job.no_login else "не прошёл проверку"
 
 
 async def _try_server(client, job: PurchaseJob) -> None:
@@ -380,6 +390,9 @@ async def _try_server(client, job: PurchaseJob) -> None:
             good = next((ip for ip in state.ipv4 if ip_matches(ip, job.prefixes)), None)
         else:  # no subnets chosen ("only working" mode): any IP will do
             good = state.ipv4[0] if state.ipv4 else None
+        if good and good in job.failed_ips:
+            good, reason = None, "уже не прошёл проверку"
+            job.skipped_bad += 1
         if good and block_is_bad(job, good):
             good, reason = None, "блок не проходит проверку"
             job.skipped_bad += 1
@@ -396,7 +409,7 @@ async def _try_server(client, job: PurchaseJob) -> None:
                 elif job.check_url:
                     job.log.append(f"🔎 {_code(good)} — проверяю…")
                     works, _why = await _check(client, job, state, good)  # details stay in the bot's log
-                    reason = "не прошёл проверку"
+                    reason = _fail_reason(job, good)
                 if works and len(job.kept) < job.count and not job.cancelled:
                     job.log.append(f"✅ {_code(good)} — " + ("проверка пройдена, сервер рабочий" if job.check_url
                                                             else "подходит, оставлен"))

@@ -320,6 +320,28 @@ async def always_failing():
     assert not any("попыток ни одного" in line for line in j.log), "no 'no matching IP' hint without IPs"
 
 
+async def failed_ip_not_rebought():
+    """The provider hands back an IP that already failed the check: no second server on it."""
+    from bot import checker
+    c = FakeReserve(["45.82.31.237", "8.8.8.8", "45.82.31.237", "45.82.31.50"], ["1.1.1.1"])
+    j = job(["45.82.31"])
+    j.check_url = "https://example.invalid/"
+    j.port_parallel = 1
+    orig = checker.check_server
+
+    async def fake_check(ip, url, password=None, key_file=None, ssh_timeout=0):
+        return (ip != "45.82.31.237"), "html" if ip != "45.82.31.237" else "no page"
+    checker.check_server = fake_check
+    try:
+        await run_purchase(c, j, nothing)
+    finally:
+        checker.check_server = orig
+    assert [k.ipv4[0] for k in j.kept] == ["45.82.31.50"], j.log
+    built = [c.servers[sid] for sid, _ in c.created]
+    assert built.count("45.82.31.237") == 1, built
+    assert any("не прошёл проверку" in line for line in j.log)
+
+
 async def scenario():
     assert {"vultr", "hetzner", "civo"} <= RESERVE_PROVIDERS and "civo" in SCOUT_PROVIDERS
     orig_wait = buyer.BUSY_WAIT
@@ -338,6 +360,7 @@ async def scenario():
         await vultr_locked()
         await reused_ip()
         await always_failing()
+        await failed_ip_not_rebought()
         await reused_ip_limited()
     finally:
         buyer.BUSY_WAIT = orig_wait
