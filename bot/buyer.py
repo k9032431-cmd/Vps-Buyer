@@ -95,7 +95,7 @@ class PurchaseJob:
     task: asyncio.Task | None = field(default=None, repr=False, compare=False)  # the running purchase
 
 
-BAD_BLOCK_FAILS = 2  # a /24 with this many failed checks and no pass is skipped without checking
+BAD_BLOCK_FAILS = 3  # a /24 with this many failed checks and no pass is skipped without checking
 
 
 def block_is_bad(job: "PurchaseJob", ip: str) -> bool:
@@ -360,7 +360,24 @@ async def _check(client, job: PurchaseJob, state: Server, ip: str) -> tuple[bool
         job.no_login.add(ip)
     elif not ok:
         job.failed_ips.add(ip)
+    if not ok and not job.hide_prefixes:  # the admin sees a neutral reason (never how servers are checked)
+        job.log.append(f"   ↳ {_short_why(ok, why)}")
     return bool(ok), why
+
+
+def _short_why(ok, why: str) -> str:
+    """Neutral words for a failed check: no tool, host or page names in the chat."""
+    low = (why or "").lower()
+    if ok is None:
+        return "не удалось войти на сервер"
+    for words, text in ((("resolve", "name or service", "dns"), "DNS не отвечает"),
+                        (("timed out", "timeout", "time-out"), "таймаут — ответа нет"),
+                        (("refused",), "соединение отклонено"), (("reset", "closed"), "соединение сброшено"),
+                        (("ssl", "tls", "certificate"), "ошибка шифрования"),
+                        (("unreachable", "no route"), "нет маршрута"), (("без html",), "неверный ответ")):
+        if any(w in low for w in words):
+            return text
+    return "нет ответа"
 
 
 def _fail_reason(job: "PurchaseJob", ip: str) -> str:

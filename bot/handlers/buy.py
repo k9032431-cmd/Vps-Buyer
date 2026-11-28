@@ -271,7 +271,24 @@ def _admin_rows(data: dict, total: int) -> list[list[Btn]]:
         rows.append([Btn(text=f"📌 Сохранить для пользователей · {total}", callback_data="buy:ipsave")])
     if data.get("preset"):
         rows.append([Btn(text="🗑 Убрать подсети пользователей", callback_data="buy:ipunsave")])
+    if any(p.get("failed") for p in data.get("pools") or []):
+        rows.append([Btn(text="♻️ Сбросить отметки нерабочих блоков", callback_data="buy:ipreset")])
     return rows
+
+
+@router.callback_query(F.data == "buy:ipreset")
+async def ip_reset_checks(cb: CallbackQuery, state: FSMContext):
+    """Blocks marked 🚫 by failed checks get a clean slate (e.g. the check failed for a passing reason)."""
+    if not is_admin(cb.from_user.id):
+        return await cb.answer("⛔ Только для админа", show_alert=True)
+    data = await state.get_data()
+    if "pools" not in data:
+        return await cb.answer("🔁 Начните покупку заново", show_alert=True)
+    n = await db.reset_check_stats(data["provider"], data["region"])
+    pools = [{**p, "failed": 0} for p in data["pools"]]
+    await state.update_data(pools=pools)
+    await cb.answer(f"♻️ Сброшено блоков: {n} — бот снова будет их проверять", show_alert=True)
+    await render_ip_screen(cb.message, state, edit=True)
 
 
 @router.callback_query(F.data.in_({"buy:ipsave", "buy:ipunsave"}))

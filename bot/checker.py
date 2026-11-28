@@ -11,6 +11,12 @@ log = logging.getLogger(__name__)
 
 HTML_MARKERS = ("<html", "<!doctype html")
 RETRY_EVERY = 3  # seconds between SSH attempts while a fresh server boots
+FETCH_TRIES = 3  # a fresh server's network / DNS may need a moment: the page is fetched up to 3 times
+FETCH_GAP = 15   # seconds between those tries
+
+
+def _text(out) -> str:
+    return out if isinstance(out, str) else (out or b"").decode("utf-8", "replace")
 
 
 def target(ip: str) -> tuple[str, int]:
@@ -23,6 +29,11 @@ def fetch_command(url: str) -> str:
     return (f"(curl -sSL --connect-timeout 8 -m 20 {u} || wget -qO- -T 15 {u} || "
             f"python3 -c \"import urllib.request,sys;sys.stdout.write(urllib.request.urlopen({url!r},timeout=25)"
             f".read().decode('utf-8','replace'))\") 2>/dev/null | head -c 200000")
+
+
+def error_command(url: str) -> str:
+    """Why the page did not open (curl's own message, e.g. "Could not resolve host")."""
+    return f"curl -sS -o /dev/null --connect-timeout 8 -m 20 {shlex.quote(url)} 2>&1 | head -c 200"
 
 
 def looks_like_html(text: str) -> bool:
@@ -42,11 +53,22 @@ async def check_server(ip: str, url: str, password: str | None = None, key_file:
                     host, port=port, username="root", password=password,
                     client_keys=[key_file] if key_file else None, known_hosts=None,
                     connect_timeout=15, login_timeout=20, keepalive_interval=10) as conn:
-                res = await asyncio.wait_for(conn.run(fetch_command(url), check=False), 90)
-                body = res.stdout if isinstance(res.stdout, str) else (res.stdout or b"").decode("utf-8", "replace")
-                if looks_like_html(body):
-                    return True, ""
-                return False, "страница не открылась" if not body.strip() else "ответ без HTML"
+                body = ""
+                for attempt in range(FETCH_TRIES):
+                    res = await asyncio.wait_for(conn.run(fetch_command(url), check=False), 90)
+                    body = _text(res.stdout)
+                    if looks_like_html(body):
+                        return True, ""
+                    if attempt < FETCH_TRIES - 1:
+                        await asyncio.sleep(FETCH_GAP)
+                why = "страница не открылась" if not body.strip() else "ответ без HTML"
+                try:
+                    detail = _text((await asyncio.wait_for(conn.run(error_command(url), check=False), 40)).stdout)
+                    if detail.strip():
+                        why += f": {detail.strip()[:150]}"
+                except Exception:
+                    pass
+                return False, why
         except (OSError, asyncssh.Error, asyncio.TimeoutError) as e:
             # booting, sshd not up yet, our key / password not applied yet — try again shortly
             last_error = f"SSH: {type(e).__name__}"

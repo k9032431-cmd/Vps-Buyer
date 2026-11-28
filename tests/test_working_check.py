@@ -200,12 +200,13 @@ async def ports_scenario():
 
 
 async def learning_scenario(port):
-    """Bad /24 blocks are learned: after 2 failed checks and no pass, servers there are dropped unchecked."""
+    """Bad /24 blocks are learned: after 3 failed checks and no pass, servers there are dropped unchecked."""
     from bot.buyer import block_is_bad
     checker.target = lambda ip: (CURRENT_IP.__setitem__(0, ip) or ("127.0.0.1", port))
     digitalocean.asyncio.sleep = lambda s: ORIG_SLEEP(0)
     app, st = do_t.make_app([("142.93.100.1", "255.255.240.0"), ("142.93.100.2", "255.255.240.0"),
-                             ("142.93.100.3", "255.255.240.0"), ("142.93.99.1", "255.255.240.0")])
+                             ("142.93.100.3", "255.255.240.0"), ("142.93.100.4", "255.255.240.0"),
+                             ("142.93.99.1", "255.255.240.0")])
     st["limit"] = 100
     app.router.add_route("*", "/v2/account/keys", lambda r: do_t.web.json_response(
         {"ssh_keys": [], "links": {}}) if r.method == "GET" else do_t.web.json_response({"ssh_key": {"id": 1}}, status=201))
@@ -219,13 +220,16 @@ async def learning_scenario(port):
                               check_timeout=20)
             await run_purchase(c, job, lambda j: ORIG_SLEEP(0))
         print("\n".join(job.log))
-        assert job.checked == 3, "142.93.100.1 and .2 checked and failed, .3 skipped, 142.93.99.1 checked and passed"
+        assert job.checked == 4, "142.93.100.1-.3 checked and failed, .4 skipped, 142.93.99.1 checked and passed"
         assert job.skipped_bad == 1 and any("блок не проходит проверку" in l for l in job.log)
         assert [k.ipv4[0] for k in job.kept] == ["142.93.99.1"]
-        assert job.block_stats["142.93.100"] == [0, 2] and job.block_stats["142.93.99"] == [1, 0]
+        assert job.block_stats["142.93.100"] == [0, 3] and job.block_stats["142.93.99"] == [1, 0]
+        assert any("↳ нет ответа" in l for l in job.log), "the admin sees a neutral reason"
         assert block_is_bad(job, "142.93.100.77") and not block_is_bad(job, "142.93.99.5")
         await db.add_check_results("digitalocean", "fra1", job.check_results)
-        assert await db.check_stats("digitalocean", "fra1") == {"142.93.100": [0, 2], "142.93.99": [1, 0]}
+        assert await db.check_stats("digitalocean", "fra1") == {"142.93.100": [0, 3], "142.93.99": [1, 0]}
+        assert await db.reset_check_stats("digitalocean", "fra1") == 1
+        assert await db.check_stats("digitalocean", "fra1") == {"142.93.100": [0, 0], "142.93.99": [1, 0]}
     finally:
         await srv.close()
         digitalocean.asyncio.sleep = ORIG_SLEEP
@@ -259,6 +263,7 @@ async def ports_learning_scenario():
 
 
 async def scenario():
+    checker.FETCH_GAP = 0  # retries of the page fetch without waiting
     object.__setattr__(config, "db_path", tempfile.mkdtemp() + "/t.db")
     object.__setattr__(config, "admin_ids", {UID})
     await db.init_db()

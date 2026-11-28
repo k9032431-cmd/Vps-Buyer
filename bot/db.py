@@ -414,3 +414,15 @@ async def mark_blocked(user_id: int) -> None:
         await db.execute("INSERT INTO visitors (user_id, blocked) VALUES (?, 1) "
                          "ON CONFLICT(user_id) DO UPDATE SET blocked=1", (user_id,))
         await db.commit()
+
+
+async def reset_check_stats(provider: str, region: str, only_failed: bool = True) -> int:
+    """Forget failed checks of a location (blocks marked 🚫 by mistake)."""
+    async with aiosqlite.connect(config.db_path) as db:
+        if only_failed:
+            cur = await db.execute("UPDATE check_blocks SET failed=0 WHERE provider=? AND region=? AND failed>0",
+                                   (provider, region))
+        else:
+            cur = await db.execute("DELETE FROM check_blocks WHERE provider=? AND region=?", (provider, region))
+        await db.commit()
+        return cur.rowcount

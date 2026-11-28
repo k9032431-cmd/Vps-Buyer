@@ -346,15 +346,15 @@ async def all_bad_blocks():
     """Every chosen block already failed the check: stop at once with an explanation, buy nothing."""
     c = FakeReserve(["45.82.31.237"], ["1.1.1.1"])
     j = job(["45.82.31"])
-    j.check_url, j.block_stats = "https://example.invalid/", {"45.82.31": [0, 2]}
+    j.check_url, j.block_stats = "https://example.invalid/", {"45.82.31": [0, 3]}
     await run_purchase(c, j, nothing)
     assert j.error and "не проходят проверку" in j.error and not c.ports and not c.created
     j2 = job(["45.82.31", "45.82.32"])  # another block is still unknown → go on
-    j2.check_url, j2.block_stats = "https://example.invalid/", {"45.82.31": [0, 2]}
+    j2.check_url, j2.block_stats = "https://example.invalid/", {"45.82.31": [0, 3]}
     from bot.buyer import _all_chosen_bad
     assert not _all_chosen_bad(j2)
     j3 = job(["45.82.30.0/23"])
-    j3.check_url, j3.block_stats = "x", {"45.82.30": [0, 2], "45.82.31": [0, 3]}
+    j3.check_url, j3.block_stats = "x", {"45.82.30": [0, 3], "45.82.31": [0, 3]}
     assert _all_chosen_bad(j3)
 
 
