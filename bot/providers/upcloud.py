@@ -79,7 +79,10 @@ class UpCloudClient:
                                   "SERVER_LIMIT_REACHED", "IP_ADDRESS_LIMIT_REACHED", "STORAGE_LIMIT_REACHED") \
                             or "LIMIT" in code:
                         status = 429  # account limit: our deletions free it up
-                    elif code in ("INSUFFICIENT_CREDITS", "TRIAL_PLAN", "PAYMENT_REQUIRED"):
+                    elif "TRIAL" in code:
+                        msg = ("на пробном аккаунте UpCloud это недоступно — пополните баланс (от €10), "
+                               f"чтобы снять ограничения, или выберите локацию без «🧪» ({msg})")
+                    elif code in ("INSUFFICIENT_CREDITS", "PAYMENT_REQUIRED"):
                         msg = f"недостаточно средств на балансе UpCloud ({msg})"
                     raise ProviderError(f"UpCloud {method} {path} → {r.status} {code}: {msg}", status)
                 return body
@@ -99,6 +102,8 @@ class UpCloudClient:
             if z.get("public", "yes") not in ("yes", True):
                 continue
             country, city = ZONES.get(z["id"], ("", z.get("description") or z["id"]))
+            if z.get("trial_allowed") in ("no", False):
+                city += " · 🧪 не для пробного"  # trial accounts can't create servers here
             result.append(RegionStatus(z["id"], True, "", None, [], country, city))
         return result
 

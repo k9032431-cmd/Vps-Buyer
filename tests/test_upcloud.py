@@ -29,7 +29,7 @@ def fake_upcloud(ips):
     a.middlewares.append(auth)
     a.router.add_get("/1.3/account", lambda r: web.json_response({"account": {"credits": 9972.2324, "username": "me"}}))
     a.router.add_get("/1.3/zone", lambda r: web.json_response({"zones": {"zone": [
-        {"id": "fi-hel1", "description": "Helsinki #1", "public": "yes"},
+        {"id": "fi-hel1", "description": "Helsinki #1", "public": "yes", "trial_allowed": "no"},
         {"id": "se-sto1", "description": "Stockholm #1", "public": "yes"},
         {"id": "fi-hel1-private", "description": "private", "public": False}]}}))
     a.router.add_get("/1.3/plan", lambda r: web.json_response({"plans": {"plan": [
@@ -104,6 +104,7 @@ async def scenario():
         async with upcloud.UpCloudClient("ucat_TEST", url) as c:
             regs = {r.region: r for r in await c.region_statuses()}
             assert set(regs) == {"fi-hel1", "se-sto1"} and regs["fi-hel1"].country == "FI"
+            assert regs["fi-hel1"].city.endswith("🧪 не для пробного") and "🧪" not in regs["se-sto1"].city
             flavors = await c.list_flavors("fi-hel1")
             assert [f.id for f in flavors] == ["DEV-1xCPU-1GB", "1xCPU-2GB"], "GPU hidden, cheapest first"
             assert flavors[0].kind == "standard" and "0.0074/час" in flavors[0].price
