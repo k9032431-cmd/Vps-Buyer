@@ -1177,32 +1177,49 @@ async def scan_offer(cb: CallbackQuery, state: FSMContext):
     image_id = choices[0].id if choices else images[0].id
     await state.update_data(scan={"flavor": asdict(flavor), "image_id": image_id, "hour": hour})
     cur = SCAN_CURRENCY.get(data["provider"], "₽")
+    par, speed = _scan_speed(data)
     rows = [[Btn(text=f"🔍 {n} серверов · ≈{n * hour:.2f} {cur}", callback_data=f"buy:scango:{n}")]
             for n in SCAN_SIZES]
     rows.append([Btn(text=f"✏️ Своё число (до {config.scan_max})", callback_data="buy:scannum")])
+    rows.append(speed)
     rows.append(back("buy:ipback", "⬅️ Назад к выбору IP"))
     await cb.message.edit_text(
         "🔍 <b>Разведка IP</b>\n"
         f"📍 {hd.quote(data['region_label'])}\n\n"
         f"У {PROVIDER_NAMES[data['provider']]} нет списка подсетей, поэтому бот один раз проверит их сам:\n"
-        "1️⃣ создаст самый дешёвый сервер\n"
+        "1️⃣ создаст самый дешёвый сервер (по скорости — несколько сразу)\n"
         "2️⃣ запишет, какой IP он получил\n"
         "3️⃣ сразу удалит сервер и перейдёт к следующему\n"
         "4️⃣ в конце пришлёт отчёт: какие блоки <code>a.b.c.#</code> сейчас выдаются\n\n"
         f"⚙️ Тариф для проверки: <b>{hd.quote(flavor.name)}</b> · {hour:g} {cur}/час\n"
         "💸 Оплата почасовая — каждый пробный сервер обходится примерно в час тарифа.\n\n"
+        f"⚡ Скорость: <b>{par}</b> одновременно — в {par} раз быстрее, цена та же (платите за каждый сервер, "
+        "а не за скорость). Упрётся в лимит аккаунта — бот подождёт.\n\n"
         "💡 Чем больше серверов, тем полнее картина. Найденные блоки появятся в выборе IP."
         + ("\n\n⚡ Сначала бот попробует брать IP <b>без серверов</b> (почти бесплатно) — серверы "
            "понадобятся, только если провайдер это не разрешит." if data["provider"] == "ovh" else ""),
         reply_markup=kb(*rows))
 
 
+def _scan_speed(data: dict) -> tuple[int, list[Btn]]:
+    par = data.get("scan_par") or config.scan_parallel
+    return par, [Btn(text=f"{'✅ ' if n == par else ''}⚡{n}", callback_data=f"buy:scanpar:{n}") for n in SPEEDS]
+
+
+@router.callback_query(F.data.startswith("buy:scanpar:"))
+async def scan_speed(cb: CallbackQuery, state: FSMContext):
+    await state.update_data(scan_par=int(cb.data.split(":")[2]))
+    await scan_offer(cb, state)
+
+
 async def _scan_offer_ips(cb: CallbackQuery, state: FSMContext, data: dict):
     """Hetzner / Vultr: scouting reserves standalone IPs only — no servers, almost free."""
     stub = Flavor("-", "-", 0, 0, 0)
     await state.update_data(scan={"flavor": asdict(stub), "image_id": "-", "hour": 0})
+    par, speed = _scan_speed(data)
     rows = [[Btn(text=f"🔍 {n} IP", callback_data=f"buy:scango:{n}")] for n in (20, 50, 100)]
     rows.append([Btn(text=f"✏️ Своё число (до {config.scan_max})", callback_data="buy:scannum")])
+    rows.append(speed)
     rows.append(back("buy:ipback", "⬅️ Назад к выбору IP"))
     await cb.message.edit_text(
         "🔍 <b>Разведка IP</b>\n"
@@ -1212,6 +1229,7 @@ async def _scan_offer_ips(cb: CallbackQuery, state: FSMContext, data: dict):
         "2️⃣ записывает адрес\n"
         "3️⃣ сразу освобождает его и берёт следующий\n"
         "4️⃣ в конце присылает отчёт: какие блоки сейчас выдаются\n\n"
+        f"⚡ Скорость: <b>{par}</b> IP одновременно.\n"
         "🔎 Найденные подсети появятся в выборе IP.",
         reply_markup=kb(*rows))
 
@@ -1236,7 +1254,7 @@ async def scan_custom(cb: CallbackQuery, state: FSMContext):
         + (f"💸 Примерно {hour:g} {cur} за каждый сервер · 100 серверов ≈ {100 * hour:.2f} {cur}\n"
            if data["provider"] not in RESERVE_PROVIDERS else "💸 Проверяются только IP, без серверов — почти бесплатно.\n")
         + ("" if data["provider"] in RESERVE_PROVIDERS
-           else "⏱ Серверы проверяются по одному: создал → записал IP → удалил → следующий."),
+           else f"⏱ Одновременно: {data.get('scan_par') or config.scan_parallel} (скорость выбирается на прошлом экране)."),
         reply_markup=kb(back("buy:scan", "⬅️ Назад")))
     await cb.answer()
 
@@ -1261,7 +1279,7 @@ async def start_scan(msg: Message, state: FSMContext, bot: Bot, uid: int, sample
         return
     acc = await db.get_account(uid, data["account_id"])
     job = ScanJob(region=data["region"], flavor=Flavor(**data["scan"]["flavor"]), image_id=data["scan"]["image_id"],
-                  samples=samples, parallel=config.scan_parallel)
+                  samples=samples, parallel=data.get("scan_par") or config.scan_parallel)
     cancel_kb = kb([Btn(text="⛔ Остановить", callback_data="buy:cancel")])
     label = data["region_label"]
     if edit:

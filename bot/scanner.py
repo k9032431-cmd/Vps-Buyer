@@ -16,6 +16,8 @@ from .providers import Flavor, ProviderError
 from .providers.base import prefix24
 
 log = logging.getLogger(__name__)
+BUSY_TRIES = 20   # tries of one probe while the account is at its limit
+BUSY_WAIT = 15
 
 
 @dataclass
@@ -38,6 +40,7 @@ class ScanJob:
     task: asyncio.Task | None = field(default=None, repr=False, compare=False)  # the running scan
     finished_probes: int = 0
     no_ports: bool = False     # the provider refused IP-only probes: buy servers instead
+    waiting: bool = False      # a probe is waiting for the account limit
 
     def eta_seconds(self) -> float | None:
         if not self.finished_probes:
@@ -104,12 +107,24 @@ async def run_scan(client, job: ScanJob, on_progress: Callable[[ScanJob], Awaita
         async with sem:
             if job.cancelled or job.error:
                 return
-            try:
-                await _probe(client, job)
-            except Exception as e:
-                job.log.append(f"⚠️ {html.escape(str(e))[:200]}")
-                if _fatal(e):
-                    job.error = str(e)
+            for attempt in range(BUSY_TRIES):
+                try:
+                    await _probe(client, job)
+                    break
+                except Exception as e:
+                    busy = isinstance(e, ProviderError) and e.status == 429
+                    if busy and attempt < BUSY_TRIES - 1 and not job.cancelled:
+                        # account limit (servers still being deleted) or rate limit: wait, don't lose the probe
+                        if not job.waiting:
+                            job.log.append("⏳ Лимит аккаунта — жду, пока удалятся прошлые серверы")
+                        job.waiting = True
+                        await asyncio.sleep(BUSY_WAIT)
+                        continue
+                    job.log.append(f"⚠️ {html.escape(str(e))[:200]}")
+                    if _fatal(e):
+                        job.error = str(e)
+                    break
+            job.waiting = False
             job.finished_probes += 1
             await on_progress(job)
 

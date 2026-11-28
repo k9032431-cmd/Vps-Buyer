@@ -130,6 +130,44 @@ async def scenario():
         await srv.close()
 
 
+async def scan_limit_scenario():
+    """Trial account: 2 IPv4 at once; servers still being deleted count → the scout waits, loses nothing."""
+    from bot import scanner
+    from bot.providers import Flavor, ProviderError, Server
+
+    class Limited:
+        alive, made, ips = 0, 0, iter(f"5.22.{i}.1" for i in range(1, 50))
+
+        async def create_server(self, *a, **k):
+            if self.alive >= 2:
+                raise ProviderError("UpCloud POST /server → 403 SERVER_IP_LIMIT_REACHED: Trial IPv4 address quota "
+                                    "of 2 exceeded by 1.", 429)
+            self.alive += 1
+            self.made += 1
+            return Server(f"s{self.made}", "x", "BUILD", [], None)
+
+        async def wait_ip(self, region, sid, timeout):
+            return Server(sid, "x", "BUILD", [next(self.ips)], None)
+
+        async def delete_server(self, region, sid):
+            asyncio.get_running_loop().call_later(0.01, self.release)  # deleted a moment later
+
+        def release(self):
+            self.alive -= 1
+
+    orig = scanner.BUSY_WAIT
+    scanner.BUSY_WAIT = 0.02
+    try:
+        c = Limited()
+        job = scanner.ScanJob("pl-waw1", Flavor("p", "p", 1, 1, 1), "img", 10, parallel=5)
+        await asyncio.wait_for(scanner.run_scan(c, job, lambda j: ORIG_SLEEP(0)), 10)
+    finally:
+        scanner.BUSY_WAIT = orig
+    assert len(job.ips) == 10 and c.made == 10, (len(job.ips), job.log)
+    assert not any("SERVER_IP_LIMIT_REACHED" in line for line in job.log), "waited, not failed"
+    assert sum("Лимит аккаунта" in line for line in job.log) >= 1
+
+
 def test_upcloud():
     orig = buyer.asyncio.sleep
     upcloud.asyncio.sleep = buyer.asyncio.sleep = lambda s: ORIG_SLEEP(0)
@@ -137,6 +175,7 @@ def test_upcloud():
         asyncio.run(scenario())
     finally:
         upcloud.asyncio.sleep = buyer.asyncio.sleep = orig
+    asyncio.run(scan_limit_scenario())  # real (short) waits
 
 
 if __name__ == "__main__":
